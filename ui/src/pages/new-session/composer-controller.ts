@@ -9,14 +9,8 @@ import {
 import { ComposerEmojiMenu } from "../chat/components/chat-composer-emoji.tsx";
 import { HumanMentionMenu } from "../chat/components/chat-composer-mention-menu.tsx";
 import type { ChatComposerPlusMenuView } from "../chat/components/chat-composer-plus-menu.types.ts";
-import {
-  createSkillMenuState,
-  resetSkillMenuState,
-} from "../chat/components/chat-composer-skill-menu.tsx";
-import {
-  createSlashMenuState,
-  resetSlashMenuState,
-} from "../chat/components/chat-composer-slash-menu.tsx";
+import { createSkillMenu } from "../chat/components/chat-composer-skill-menu.tsx";
+import { createSlashMenu } from "../chat/components/chat-composer-slash-menu.tsx";
 import { insertComposerDictation } from "../chat/composer-dictation.ts";
 
 export type NewSessionComposerTextarea = ReturnType<typeof createNewSessionComposerTextarea>;
@@ -31,8 +25,8 @@ export function createNewSessionComposerTextarea() {
   const control = {
     // An opening gets one cast; typing and async picker updates never reroll it.
     critterVisit: Math.random(),
-    skillMenuState: createSkillMenuState(),
-    slashMenuState: createSlashMenuState(),
+    skillMenu: createSkillMenu(),
+    slashMenu: createSlashMenu(),
     mentionMenu: new HumanMentionMenu(),
     emojiMenu: new ComposerEmojiMenu(),
     composing: false,
@@ -127,7 +121,7 @@ export function createNewSessionComposerTextarea() {
       skillCommandAgentId = normalizedAgentId;
       skillCommandDraftOwnerKey = draftOwnerKey;
       control.emojiMenu.close();
-      resetSkillMenuState(control.skillMenuState);
+      control.skillMenu.reset();
     },
     ownsSkillCommands(
       client: GatewayBrowserClient | null,
@@ -141,14 +135,16 @@ export function createNewSessionComposerTextarea() {
       );
     },
     disconnect() {
+      control.skillMenu.dispose();
+      control.slashMenu.dispose();
       control.emojiMenu.close();
       control.composing = false;
       control.mentionMenu.dispose();
       skillCommandClient = null;
       skillCommandAgentId = "";
       skillCommandDraftOwnerKey = "";
-      resetSkillMenuState(control.skillMenuState);
-      resetSlashMenuState(control.slashMenuState);
+      control.skillMenu.reset();
+      control.slashMenu.reset();
       control.capabilityMenuOpen = false;
       control.capabilityMenuView = "root";
       control.ref();
