@@ -2,8 +2,8 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPluginRuntimeStore } from "../plugin-sdk/runtime-store.js";
 import { runPluginRegisterSyncInRegistry } from "./loader-module-runtime.js";
-import { createPluginRecord } from "./loader-records.js";
 import { PluginInstance } from "./plugin-instance.js";
+import { createOwnershipRecord } from "./registry-ownership.test-support.js";
 import { createTestPluginRegistry } from "./registry-runtime.test-helpers.js";
 import {
   clearActivePluginRegistry,
@@ -25,18 +25,8 @@ afterEach(async () => {
 function createRegistrationFixture() {
   const builder = createTestPluginRegistry();
   registries.push(builder.registry);
-  const createRecord = (
-    id: string,
-    fields: Partial<Parameters<typeof createPluginRecord>[0]> = {},
-  ) => {
-    const record = createPluginRecord({
-      id,
-      source: `/plugins/${id}/index.ts`,
-      origin: "global",
-      enabled: true,
-      configSchema: false,
-      ...fields,
-    });
+  const createRecord = (id: string, fields: Parameters<typeof createOwnershipRecord>[1] = {}) => {
+    const record = createOwnershipRecord(id, { source: `/plugins/${id}/index.ts`, ...fields });
     builder.registry.plugins.push(record);
     return record;
   };

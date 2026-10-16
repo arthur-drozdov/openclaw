@@ -19,8 +19,11 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import * as gatewayCreation from "../gateway/session-create-service.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { resolveIncognitoOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
-import { createPluginRecord } from "./loader-records.js";
-import { createRuntimeTestRegistry } from "./registry-runtime.test-helpers.js";
+import {
+  createOwnershipHarness,
+  createOwnershipRegistry,
+  createOwnershipSubagent,
+} from "./registry-ownership.test-support.js";
 import { createPluginRuntime } from "./runtime/index.js";
 
 const dirs = useAutoCleanupTempDirTracker(afterAll);
@@ -51,12 +54,9 @@ function withMemorySession<T>(sessionKey: string, run: () => T | Promise<T>) {
   return withMemoryActor(sessionKey, (binding) => runWithSessionActorStorage(binding, run));
 }
 
-function createMemoryEntry(
-  sessionKey: string,
-  sessionId: string,
-  entry: Partial<InternalSessionEntry> = {},
-) {
-  return withMemoryActor(sessionKey, (binding) =>
+async function createMemoryEntry(sessionId: string, entry: Partial<InternalSessionEntry> = {}) {
+  const sessionKey = `agent:main:dashboard:incognito-${sessionId}`;
+  await withMemoryActor(sessionKey, (binding) =>
     binding.actor.storage.mutate(
       {
         type: "session.entry.create",
@@ -65,6 +65,7 @@ function createMemoryEntry(
       authority,
     ),
   );
+  return sessionKey;
 }
 
 function observeSql() {
@@ -81,63 +82,35 @@ beforeAll(() => {
   });
 });
 
-beforeEach(() => {
-  vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
-});
+beforeEach(() => vi.stubEnv("OPENCLAW_STATE_DIR", stateDir));
 
 afterAll(() => {
   memorySessionActorOwners.closeDatabase({ agentId: "main", path: storePath });
   vi.unstubAllEnvs();
 });
 
-afterEach(() => {
-  vi.restoreAllMocks();
-});
+afterEach(() => vi.restoreAllMocks());
 
 function registry() {
-  const subagentRun = vi.fn(async () => ({ runId: "unexpected" }));
-  const runtime = createPluginRuntime({
-    subagent: {
-      complete: async () => ({ text: "" }),
-      forkSession: async () => ({ text: "" }),
-      run: subagentRun,
-      waitForRun: async () => ({ status: "ok" }),
-      getSessionMessages: async () => ({ messages: [] }),
-      deleteSession: async () => {},
-    },
-  });
-  const plugins = createRuntimeTestRegistry(runtime);
-  const api = (id: string) =>
-    plugins.createApi(
-      createPluginRecord({
-        id,
-        source: `/plugins/${id}/index.js`,
-        origin: "bundled",
-        enabled: true,
-        configSchema: false,
-      }),
-      { config: {} },
-    );
-  const owner = api("owner");
-  const caller = api("caller");
-  const harness = {
-    id: "test-harness",
+  const subagent = createOwnershipSubagent("unexpected", "");
+  const subagentRun = subagent.run;
+  const runtime = createPluginRuntime({ subagent });
+  const plugins = createOwnershipRegistry(runtime);
+  const { api: owner } = plugins.createApi("owner");
+  const { api: caller } = plugins.createApi("caller");
+  const delegatedExecutionPluginIds = ["caller"];
+  const harness = createOwnershipHarness("test-harness", {
     label: "Test harness",
-    delegatedExecutionPluginIds: ["caller"],
-    supports: () => ({ supported: true as const }),
-    runAttempt: async () => {
-      throw new Error("unused");
-    },
-  };
+    delegatedExecutionPluginIds,
+  });
   owner.registerAgentHarness(harness);
-  return { runtime, owner, caller, harness, subagentRun };
+  return { runtime, owner, caller, harness, subagentRun, delegatedExecutionPluginIds };
 }
 
 it("keeps memory ownership and by-ID checks out of host SQL", async () => {
   const { owner, caller, subagentRun } = registry();
-  const key = "agent:main:dashboard:incognito-plugin-owned";
   const sessionId = "plugin-owned";
-  await createMemoryEntry(key, sessionId, {
+  const key = await createMemoryEntry(sessionId, {
     agentHarnessId: "test-harness",
     modelSelectionLocked: true,
   });
@@ -151,24 +124,22 @@ it("keeps memory ownership and by-ID checks out of host SQL", async () => {
     );
   });
   const session = owner.runtime.agent.session;
+  const target = { sessionKey: key, storePath };
+  const displayName = "owned update";
   await expect(
-    session.patchSessionEntry({
-      sessionKey: key,
-      storePath,
-      update: () => ({ displayName: "owned update" }),
-    }),
-  ).resolves.toMatchObject({ displayName: "owned update" });
-  await expect(session.getSessionEntryAsync({ sessionKey: key, storePath })).resolves.toMatchObject(
-    { displayName: "owned update" },
-  );
+    session.patchSessionEntry({ ...target, update: () => ({ displayName }) }),
+  ).resolves.toMatchObject({ displayName });
+  await expect(session.getSessionEntryAsync(target)).resolves.toMatchObject({ displayName });
   expect(subagentRun).not.toHaveBeenCalled();
   expect(sql.queries).toEqual([]);
 });
 
 it("classifies sandbox authority from its captured actor despite a different configured store", async () => {
   const { owner } = registry();
-  const sessionKey = "agent:main:dashboard:incognito-workspace-policy";
-  await createMemoryEntry(sessionKey, "workspace-policy", { updatedAt: 1, sandbox: "required" });
+  const sessionKey = await createMemoryEntry("workspace-policy", {
+    updatedAt: 1,
+    sandbox: "required",
+  });
   const config: OpenClawConfig = {
     session: {
       store: resolveIncognitoOpenClawAgentSqlitePath({
@@ -201,9 +172,8 @@ it("classifies sandbox authority from its captured actor despite a different con
 it("rechecks delegated harness authority after admission waits", async () => {
   setRuntimeConfigSnapshot({});
   onTestFinished(clearRuntimeConfigSnapshot);
-  const { runtime, caller, harness } = registry();
-  const key = "agent:main:dashboard:incognito-delegated";
-  await createMemoryEntry(key, "delegated", {
+  const { runtime, caller, harness, delegatedExecutionPluginIds } = registry();
+  const key = await createMemoryEntry("delegated", {
     agentHarnessId: harness.id,
     modelSelectionLocked: true,
   });
@@ -223,7 +193,7 @@ it("rechecks delegated harness authority after admission waits", async () => {
   );
   const rejected = expect(work).rejects.toThrow('owned by plugin "owner"');
   await awaitGateBeforeSettlement(entered.promise, work, "delegated admission did not enter");
-  harness.delegatedExecutionPluginIds.length = 0;
+  delegatedExecutionPluginIds.length = 0;
   release.resolve();
   await rejected;
   expect(run).not.toHaveBeenCalled();
@@ -234,19 +204,19 @@ it.each(["finalize", "rollback", "changed" as const])(
   "%s retains the exact actor initializer",
   async (outcome) => {
     const { owner, harness } = registry();
-    const key = `agent:main:dashboard:incognito-initialize-${outcome}`;
     const initialEntry = {
       agentHarnessId: harness.id,
       modelSelectionLocked: true as const,
       pluginExtensions: { test: { initializing: true } },
     };
-    await createMemoryEntry(key, `initialize-${outcome}`, {
+    const key = await createMemoryEntry(`initialize-${outcome}`, {
       ...initialEntry,
       initializationPending: true,
     });
     const sql = observeSql();
     await withMemorySession(key, async () => {
       const session = owner.runtime.agent.session;
+      const target = { sessionKey: key, storePath };
       const creation = session.createSessionEntry({
         cfg: {},
         key,
@@ -262,8 +232,7 @@ it.each(["finalize", "rollback", "changed" as const])(
           }
           if (outcome === "changed") {
             await session.patchSessionEntry({
-              sessionKey: key,
-              storePath,
+              ...target,
               update: () => ({ displayName: "concurrent owner" }),
             });
             initialization.assertCurrent();
@@ -282,7 +251,7 @@ it.each(["finalize", "rollback", "changed" as const])(
           outcome === "rollback" ? "initializer rejected" : "guarded rollback did not complete",
         );
       }
-      const stored = await session.getSessionEntryAsync({ sessionKey: key, storePath });
+      const stored = await session.getSessionEntryAsync(target);
       if (outcome === "rollback") {
         expect(stored).toBeUndefined();
       }

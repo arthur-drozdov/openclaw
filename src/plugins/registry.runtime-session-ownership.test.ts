@@ -8,34 +8,26 @@ import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { normalizeSessionDeliveryState } from "../utils/delivery-context.shared.js";
-import { createPluginRecord } from "./loader-records.js";
 import { revokePluginRecord } from "./registry-lifecycle.js";
-import { createRuntimeTestRegistry } from "./registry-runtime.test-helpers.js";
+import {
+  createOwnershipHarness,
+  createOwnershipRegistry,
+  createOwnershipSubagent,
+} from "./registry-ownership.test-support.js";
 import { getPluginRuntimeGatewayRequestScope } from "./runtime/gateway-request-scope.js";
 import { createPluginRuntime } from "./runtime/index.js";
 import type { PluginRuntime } from "./runtime/types.js";
 
 type RunParams = Parameters<PluginRuntime["agent"]["runEmbeddedAgent"]>[0];
 
-function createRecord(id: string) {
-  return createPluginRecord({
-    id,
-    source: `/plugins/${id}/index.js`,
-    origin: "bundled",
-    enabled: true,
-    configSchema: false,
-  });
-}
-
 function pluginFixture(runtime: PluginRuntime, id: string, config: OpenClawConfig = {}) {
-  const registry = createRuntimeTestRegistry(runtime);
-  const record = createRecord(id);
-  return { registry, record, api: registry.createApi(record, { config }) };
+  const { builder: registry, createApi } = createOwnershipRegistry(runtime, config);
+  return { registry, ...createApi(id) };
 }
 
 function createApis(runtime: PluginRuntime, config: OpenClawConfig = {}) {
-  const registry = createRuntimeTestRegistry(runtime);
-  return (id: string) => registry.createApi(createRecord(id), { config });
+  const { createApi } = createOwnershipRegistry(runtime, config);
+  return (id: string) => createApi(id).api;
 }
 
 function sessionEntry(sessionId: string, fields: Partial<SessionEntry> = {}): SessionEntry {
@@ -53,17 +45,19 @@ describe("plugin registry runtime session ownership", () => {
       const delivery = normalizeSessionDeliveryState({
         context: { channel: "slack", to: "C123" },
       });
+      const waitForAdmission = async () => {
+        entered.resolve();
+        await resume.promise;
+      };
       let stored: SessionEntry = original;
       runtime.agent.session.getSessionEntryAsync = async () => stored;
       runtime.agent.session.upsertSessionEntry = async ({ entry }) => {
-        entered.resolve();
-        await resume.promise;
+        await waitForAdmission();
         stored = entry;
       };
       runtime.agent.session.prepareSessionEntryPatch = async (params) => {
         const patch = await params.prepare(stored, { existingEntry: stored });
-        entered.resolve();
-        await resume.promise;
+        await waitForAdmission();
         if (params.authority?.kind === "host") {
           params.authority.assertCurrent();
         }
@@ -76,14 +70,12 @@ describe("plugin registry runtime session ownership", () => {
         return stored;
       };
       runtime.channel.session.updateLastRoute = async () => {
-        entered.resolve();
-        await resume.promise;
+        await waitForAdmission();
         stored = { ...stored, delivery };
         return stored;
       };
       runtime.channel.session.updateLastRouteWithAuthority = async ({ authority }) => {
-        entered.resolve();
-        await resume.promise;
+        await waitForAdmission();
         if (authority.kind === "host") {
           authority.assertCurrent();
         } else {
@@ -117,14 +109,11 @@ describe("plugin registry runtime session ownership", () => {
     "fences a managed asynchronous %s read when its plugin retires before disclosure",
     async (selection) => {
       const runtime = createPluginRuntime();
-      const pending = createDeferredCore<SessionEntry | undefined>();
+      const pending = createDeferredCore<SessionEntry>();
       const entry = { sessionId: "managed", updatedAt: 1 };
       runtime.agent.session.getSessionEntryAsync = () => pending.promise;
       runtime.agent.session.getSessionEntryByIdAsync = async () => {
-        const selectedEntry = await pending.promise;
-        return selectedEntry
-          ? { sessionKey: "agent:main:managed", entry: selectedEntry }
-          : undefined;
+        return { sessionKey: "agent:main:managed", entry: await pending.promise };
       };
       const { registry, record, api } = pluginFixture(runtime, "managed-reader");
       const reading =
@@ -285,7 +274,7 @@ describe("plugin registry runtime session ownership", () => {
   it("limits locked harness session mutation and execution to the harness owner", async () => {
     const cfg: OpenClawConfig = {};
     setRuntimeConfigSnapshot(cfg);
-    onTestFinished(() => clearRuntimeConfigSnapshot());
+    onTestFinished(clearRuntimeConfigSnapshot);
     const key = {
       reserved: "agent:main:harness:codex:thread-1",
       ordinary: "agent:main:ordinary",
@@ -321,14 +310,7 @@ describe("plugin registry runtime session ownership", () => {
       [key.locked]: locked,
       [key.legacy]: legacy,
     } as unknown as Record<string, SessionEntry>;
-    const subagent = {
-      complete: vi.fn(async () => ({ text: "completed" })),
-      forkSession: vi.fn(async () => ({ text: "completed" })),
-      run: vi.fn(async () => ({ runId: "subagent-run" })),
-      waitForRun: vi.fn(async () => ({ status: "ok" as const })),
-      getSessionMessages: vi.fn(async () => ({ messages: [] })),
-      deleteSession: vi.fn(async () => {}),
-    } satisfies PluginRuntime["subagent"];
+    const subagent = createOwnershipSubagent("subagent-run");
     const runtime = createPluginRuntime({ subagent });
     const session = runtime.agent.session;
     session.getSessionEntryAsync = vi.fn(async (params) => entries[params.sessionKey]);
@@ -382,15 +364,12 @@ describe("plugin registry runtime session ownership", () => {
     const owner = createApi("codex-owner");
     const other = createApi("other-plugin");
     const voice = createApi("voice-call");
-    owner.registerAgentHarness({
-      id: "codex",
-      label: "Codex",
-      delegatedExecutionPluginIds: ["voice-call"],
-      supports: () => ({ supported: true }),
-      runAttempt: async () => {
-        throw new Error("unused");
-      },
-    });
+    owner.registerAgentHarness(
+      createOwnershipHarness("codex", {
+        label: "Codex",
+        delegatedExecutionPluginIds: ["voice-call"],
+      }),
+    );
     const runParams = {
       sessionId: reserved.sessionId,
       sessionKey: key.reserved,
@@ -423,6 +402,12 @@ describe("plugin registry runtime session ownership", () => {
       expect(pending).rejects.toThrow('owned by plugin "codex-owner"');
     const gatewayAgent = (api: typeof owner, identity: Record<string, string>) =>
       api.runtime.gateway.request("agent", { ...identity, message: "continue" });
+    const gatewayPatch = (sessionKey: string, sessionId: string) =>
+      other.runtime.gateway.request("sessions.patch", {
+        key: sessionKey,
+        archived: true,
+        expectedSessionId: sessionId,
+      });
     const admission = { storePath: "/tmp/sessions.json", sessionKey: key.reserved };
     await expect(patch(owner, key.reserved)).resolves.toMatchObject(reserved);
     await ok(run(owner));
@@ -482,13 +467,7 @@ describe("plugin registry runtime session ownership", () => {
       other.runtime.subagent.run({ sessionKey: key.reserved, message: "continue" }),
     );
     await rejectedByOwner(other.runtime.subagent.deleteSession({ sessionKey: key.reserved }));
-    await rejectedByOwner(
-      other.runtime.gateway.request("sessions.patch", {
-        key: key.reserved,
-        archived: true,
-        expectedSessionId: reserved.sessionId,
-      }),
-    );
+    await rejectedByOwner(gatewayPatch(key.reserved, reserved.sessionId));
     const gatewayRequestCountBeforeBatch = gatewayRequest.mock.calls.length;
     await rejectedByOwner(
       other.runtime.gateway.request("sessions.patchMany", {
@@ -569,13 +548,7 @@ describe("plugin registry runtime session ownership", () => {
     await expect(
       other.runtime.subagent.deleteSession({ sessionKey: key.legacy }),
     ).resolves.toBeUndefined();
-    await ok(
-      other.runtime.gateway.request("sessions.patch", {
-        key: key.legacy,
-        archived: true,
-        expectedSessionId: legacy.sessionId,
-      }),
-    );
+    await ok(gatewayPatch(key.legacy, legacy.sessionId));
     await ok(run(other, { sessionId: ordinary.sessionId, sessionKey: key.ordinary }));
     await ok(other.runtime.gateway.request("voicecall.start", { to: "+15550001234" }));
   });

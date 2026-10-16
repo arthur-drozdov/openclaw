@@ -425,12 +425,10 @@ describe("bundled plugin public surface loader", () => {
       fs.linkSync(sourcePath, modulePath);
       setBundledDir(bundledPluginsDir);
       expect(loader.load(publicArtifact).marker).toBe("demo");
-      expect(() =>
-        loader.installed({
-          pluginRoot: bundledPluginsDir,
-          artifactBasename: "demo/api.js",
-        }),
-      ).toThrow("Unable to open plugin public surface demo/api.js");
+      const installed = { pluginRoot: bundledPluginsDir, artifactBasename: "demo/api.js" };
+      expect(() => loader.installed(installed)).toThrow(
+        "Unable to open plugin public surface demo/api.js",
+      );
     },
   );
 
@@ -446,12 +444,10 @@ describe("bundled plugin public surface loader", () => {
       writeArtifact(outsidePath, 'export const marker = "outside-plugin-root";\n');
       fs.linkSync(outsidePath, artifactPath);
       expect(fs.statSync(artifactPath).nlink).toBeGreaterThan(1);
-      expect(() =>
-        loader.installed({
-          pluginRoot,
-          artifactBasename: artifact,
-        }),
-      ).toThrow(`Unable to open plugin public surface ${artifact}`);
+      const installed = { pluginRoot, artifactBasename: artifact };
+      expect(() => loader.installed(installed)).toThrow(
+        `Unable to open plugin public surface ${artifact}`,
+      );
     },
   );
 
@@ -463,16 +459,13 @@ describe("bundled plugin public surface loader", () => {
     setBundledDir(bundledPluginsDir);
     const loader = await freshLoader("missing-location-retry");
     const missingError = captureThrownError(() => loader.load(publicArtifact));
-    expect(missingError.message).toBe(
-      "Unable to resolve bundled plugin public surface demo/api.js",
-    );
+    const missingMessage = "Unable to resolve bundled plugin public surface demo/api.js";
+    expect(missingError.message).toBe(missingMessage);
     writeArtifact(
       path.join(bundledPluginsDir, "demo", "api.js"),
       'export const marker = "demo";\n',
     );
-    expect(() => loader.load(publicArtifact)).toThrow(
-      "Unable to resolve bundled plugin public surface demo/api.js",
-    );
+    expect(() => loader.load(publicArtifact)).toThrow(missingMessage);
     const { clearPluginMetadataLifecycleCaches } = await import("./plugin-metadata-lifecycle.js");
     clearPluginMetadataLifecycleCaches();
     expect(loader.load(publicArtifact).marker).toBe("demo");

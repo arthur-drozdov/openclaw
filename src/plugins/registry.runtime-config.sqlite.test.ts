@@ -10,33 +10,20 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { withTempHome } from "../plugin-sdk/test-env.js";
 import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
 import { resolveIncognitoOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
-import { createPluginRecord } from "./loader-records.js";
-import { createRuntimeTestRegistry } from "./registry-runtime.test-helpers.js";
+import {
+  createOwnershipHarness,
+  createOwnershipRegistry,
+  createOwnershipSubagent,
+} from "./registry-ownership.test-support.js";
 import { createPluginRuntime } from "./runtime/index.js";
 import type { PluginRuntime } from "./runtime/types.js";
 
 function createHarnessCaller(runtime: PluginRuntime, config: OpenClawConfig, callerId: string) {
-  const registry = createRuntimeTestRegistry(runtime);
-  const createApi = (id: string) =>
-    registry.createApi(
-      createPluginRecord({
-        id,
-        source: `/plugins/${id}/index.js`,
-        origin: "bundled",
-        enabled: true,
-        configSchema: false,
-      }),
-      { config },
-    );
-  const caller = createApi(callerId);
-  createApi("harness-owner").registerAgentHarness({
-    id: "test-harness",
-    label: "Test Harness",
-    supports: () => ({ supported: true }),
-    runAttempt: async () => {
-      throw new Error("unused");
-    },
-  });
+  const { createApi } = createOwnershipRegistry(runtime, config);
+  const { api: caller } = createApi(callerId);
+  createApi("harness-owner").api.registerAgentHarness(
+    createOwnershipHarness("test-harness", { label: "Test Harness" }),
+  );
   return caller;
 }
 
@@ -52,14 +39,7 @@ describe("plugin registry SQLite session ownership", () => {
       };
       setRuntimeConfigSnapshot(config);
       onTestFinished(clearRuntimeConfigSnapshot);
-      const subagent = {
-        complete: vi.fn(async () => ({ text: "completed" })),
-        forkSession: vi.fn(async () => ({ text: "completed" })),
-        run: vi.fn(async () => ({ runId: "workboard-run" })),
-        waitForRun: vi.fn(async () => ({ status: "ok" as const })),
-        getSessionMessages: vi.fn(async () => ({ messages: [] })),
-        deleteSession: vi.fn(async () => {}),
-      } satisfies PluginRuntime["subagent"];
+      const subagent = createOwnershipSubagent("workboard-run");
       const runtime = createPluginRuntime({ subagent });
       let runtimeConfig = config;
       runtime.config = { ...runtime.config, current: () => runtimeConfig };

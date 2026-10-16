@@ -65,16 +65,11 @@ describe("bundled plugin public surface runtime", () => {
       });
       builder.registry.plugins.push(record);
       const instance = new PluginInstance(record.id, { record, registry: builder.registry });
+      const provider = { id: record.id, label: "Captured path probes", auth: [] };
       try {
         withPluginCache(cache, () => {
           bindPluginInstanceModuleLoader({ instance, origin: record.origin, source, rootDir });
-          instance.run(() =>
-            builder.createApi(record, { config: {} }).registerProvider({
-              id: record.id,
-              label: "Captured path probes",
-              auth: [],
-            }),
-          );
+          instance.run(() => builder.createApi(record, { config: {} }).registerProvider(provider));
         });
         expect(builder.registry.providers[0]?.provider.id).toBe(record.id);
         const hasSource = vi.spyOn(instance, "hasModuleSource");
@@ -149,12 +144,8 @@ describe("bundled plugin public surface runtime", () => {
     "continues rejecting %s as an actual bundled plugin directory",
     (dirName) => {
       const rootDir = tempDirs.make("openclaw-public-surface-runtime-");
-      expect(() => resolveSource(rootDir, "provider-policy-api.js", dirName)).toThrow(
-        /must be a single directory/,
-      );
-      expect(() =>
-        resolveBundled(rootDir, { dirName, artifactBasename: "provider-policy-api.js" }),
-      ).toThrow(/must be a single directory/);
+      expect(() => resolveSource(rootDir, "api.js", dirName)).toThrow(/must be a single directory/);
+      expect(() => resolveBundled(rootDir, { dirName })).toThrow(/must be a single directory/);
     },
   );
 
@@ -219,10 +210,8 @@ describe("bundled plugin public surface runtime", () => {
 
   it("prefers source public surfaces over stale auto-resolved dist artifacts in source checkouts", () => {
     const packageRoot = tempDirs.make("openclaw-public-surface-runtime-");
-    const sourceModulePath = path.join(packageRoot, "extensions", "demo", "api.ts");
-    const staleDistModulePath = path.join(packageRoot, "dist", "extensions", "demo", "api.js");
-    writeArtifact(sourceModulePath, "export const marker = 'source';\n");
-    writeArtifact(staleDistModulePath, "export const marker = 'stale-dist';\n");
+    const sourceModulePath = writeArtifact(path.join(packageRoot, "extensions", "demo", "api.ts"));
+    writeArtifact(path.join(packageRoot, "dist", "extensions", "demo", "api.js"));
     expect(
       resolveBundled(packageRoot, {
         bundledPluginsDir: path.join(packageRoot, "dist", "extensions"),
