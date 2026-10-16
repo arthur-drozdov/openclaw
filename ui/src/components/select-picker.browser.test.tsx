@@ -48,7 +48,7 @@ async function mountModel(params: Omit<ModelPickerParams, "label" | "onChange">,
 
 describe.runIf("__vitest_browser__" in globalThis)("searchable model menu layout", () => {
   it("places submenus after batched writing-direction and placement changes", async () => {
-    const [direction, setDirection] = createSignal("ltr");
+    const [direction, setDirection] = createSignal<"ltr" | "rtl">("ltr");
     const [placement, setPlacement] = createSignal<"top" | "bottom">("bottom");
     const host = mountHost();
     mountSolid(
