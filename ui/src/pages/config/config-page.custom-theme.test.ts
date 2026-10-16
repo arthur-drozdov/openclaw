@@ -52,7 +52,7 @@ function startImport(settings: Partial<UiSettings> = {}, url = "first") {
   view.props().onImportCustomTheme();
   return {
     ...view,
-    async finish(theme = customThemeFixture("first")) {
+    async finish(this: void, theme = customThemeFixture("first")) {
       pending.resolve(theme);
       await pending.promise;
       flush();

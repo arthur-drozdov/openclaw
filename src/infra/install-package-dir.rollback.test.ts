@@ -117,6 +117,7 @@ describe("installPackageDir rollback", () => {
       ...paths,
       install,
       async retain(
+        this: void,
         options: Pick<Parameters<typeof installPackageDir>[0], "sourceHardlinks"> = {},
         assertOwned?: () => void,
       ) {

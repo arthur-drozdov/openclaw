@@ -392,17 +392,21 @@ describe("Gateway computer service", () => {
         f.config.desktop!.host!.enabled = true;
       }
       const pending = disconnect ? f.service.status() : f.service.reconcileRuntimePolicy();
-      const result = await expectCleanupHeld(cleanup, pending, async () => {
-        if (!disconnect) {
-          await expect(f.invoke({ idempotencyKey: "after-reload" })).rejects.toThrow(
-            "COMPUTER_STALE_OBSERVATION",
-          );
-        }
-        expect(startComputerHostProcess).toHaveBeenCalledOnce();
-        if (disconnect) {
-          expect(f.leases[0]!.release).not.toHaveBeenCalled();
-        }
-      });
+      const result = await expectCleanupHeld<Awaited<typeof pending>>(
+        cleanup,
+        pending,
+        async () => {
+          if (!disconnect) {
+            await expect(f.invoke({ idempotencyKey: "after-reload" })).rejects.toThrow(
+              "COMPUTER_STALE_OBSERVATION",
+            );
+          }
+          expect(startComputerHostProcess).toHaveBeenCalledOnce();
+          if (disconnect) {
+            expect(f.leases[0]!.release).not.toHaveBeenCalled();
+          }
+        },
+      );
       if (disconnect) {
         expect(result).toMatchObject({ available: true });
         f.calls({ release: 1, act: 1 });

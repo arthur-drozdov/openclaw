@@ -169,7 +169,7 @@ describe("evaluateTelegramGroupPolicyAccess", () => {
 
   it("blocks unauthorized sender even when chat is explicitly allowed and sender entries exist", () => {
     const result = runAccess({
-      effectiveGroupAllow: senderAllow,
+      effectiveGroupAllow: allow(["111"]),
       senderId: "222",
       resolveGroupPolicy: () => ({
         allowlistEnabled: true,
@@ -262,7 +262,7 @@ describe("evaluateTelegramGroupPolicyAccess", () => {
 
   it("allows authorized sender in wildcard-matched group with sender entries", () => {
     const result = runAccess({
-      effectiveGroupAllow: senderAllow,
+      effectiveGroupAllow: allow(["111"]),
       senderId: "111",
       resolveGroupPolicy: () => ({
         allowlistEnabled: true,

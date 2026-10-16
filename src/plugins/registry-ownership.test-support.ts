@@ -38,7 +38,7 @@ export function createOwnershipRegistry(runtime: PluginRuntime, config: OpenClaw
   const builder = createRuntimeTestRegistry(runtime);
   return {
     builder,
-    createApi(id: string, overrides: Parameters<typeof createOwnershipRecord>[1] = {}) {
+    createApi(this: void, id: string, overrides: Parameters<typeof createOwnershipRecord>[1] = {}) {
       const record = createOwnershipRecord(id, { origin: "bundled", ...overrides });
       return { record, api: builder.createApi(record, { config }) };
     },

@@ -188,8 +188,14 @@ describe("canonical model-reference migration", () => {
       models: { "claude-cli/claude-opus-4-7": {}, "claude-cli/claude-sonnet-4-6": {} },
     });
     const seeded = applyLegacyDoctorMigrations(raw, { sourceConfigBeforeMigrations: raw });
-    expect(seeded.next?.agents?.defaults?.modelPolicy).toMatchObject({
-      allow: ["claude-cli/claude-opus-4-7", "claude-cli/claude-sonnet-4-6"],
+    expect(seeded.next).toMatchObject({
+      agents: {
+        defaults: {
+          modelPolicy: {
+            allow: ["claude-cli/claude-opus-4-7", "claude-cli/claude-sonnet-4-6"],
+          },
+        },
+      },
     });
 
     const res = normalizeCompatibilityConfigValues(seeded.next);

@@ -37,7 +37,7 @@ beforeEach(() => {
 });
 
 const openDatabase = (file?: string) => openOpenClawAgentDatabase({ ...target, path: file });
-const readRows = (db: DatabaseSync, columns = "run_id") =>
+const readRows = (db: ReturnType<typeof openDatabase>["db"], columns = "run_id") =>
   db.prepare(`SELECT ${columns} FROM message_tool_run_outcomes ORDER BY id`).all();
 type Outcome = Parameters<typeof recordMessageToolRunOutcome>[0];
 

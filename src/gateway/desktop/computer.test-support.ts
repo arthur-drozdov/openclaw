@@ -19,7 +19,7 @@ export function runExit(overrides: Partial<RunExit> = {}): RunExit {
 
 export function computerCapabilities(
   provider: ComputerUseCapabilityDescriptor["provider"],
-  actions = ["screenshot", "left_click"],
+  actions: ComputerUseCapabilityDescriptor["actions"] = ["screenshot", "left_click"],
 ): ComputerUseCapabilityDescriptor {
   return {
     contractVersion: 2,
@@ -32,12 +32,12 @@ export function computerCapabilities(
   };
 }
 
-export function observeSettlement<T>(promise: Promise<T>) {
+export function observeSettlement(promise: Promise<unknown>) {
   const settled = vi.fn();
   return { settled, done: promise.then(settled, settled) };
 }
 
-export async function whileHeld<T>(gate: Deferred<void>, check: () => T | Promise<T>) {
+export async function whileHeld<T>(gate: Deferred, check: () => T | Promise<T>) {
   try {
     return await check();
   } finally {

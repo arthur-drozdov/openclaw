@@ -3,6 +3,7 @@
 import { createSignal } from "solid-js";
 import { expect, it, vi } from "vitest";
 import { ConfigForm } from "../../components/config-form.render.tsx";
+import type { JsonSchema } from "../../components/config-form.shared.ts";
 import { i18n } from "../../i18n/index.ts";
 import { mountSolid } from "../../test-helpers/mount-solid.ts";
 import { flush } from "../../test-helpers/solid-settle.ts";
@@ -57,7 +58,10 @@ function createProps(overrides: Partial<MemoryViewProps> = {}): MemoryViewProps 
   };
 }
 
-const objectSchema = (properties: Record<string, unknown>) => ({ type: "object", properties });
+const objectSchema = (properties: Record<string, JsonSchema>): JsonSchema => ({
+  type: "object",
+  properties,
+});
 
 function renderInto(overrides: Partial<MemoryViewProps> = {}): HTMLElement {
   const props = createProps(overrides);

@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { hasNodeErrorCode } from "@openclaw/fs-safe/path";
 import * as mediaMime from "@openclaw/media-core/mime";
 import { saveMediaBuffer } from "openclaw/plugin-sdk/media-store";
 import { createAdmittedHostCapabilityTestFixture } from "openclaw/plugin-sdk/plugin-test-runtime";
@@ -384,8 +385,8 @@ function outputClient(
 }
 
 function outboundFiles(): Promise<string[]> {
-  return fs.readdir(outboundDir).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") {
+  return fs.readdir(outboundDir).catch((error: unknown) => {
+    if (hasNodeErrorCode(error, "ENOENT")) {
       return [];
     }
     throw error;

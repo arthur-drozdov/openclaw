@@ -140,7 +140,7 @@ it.each([
   ["archive not found", async () => "/tmp/does-not-exist-openclaw-archive.tgz"],
   [
     "unsupported archive",
-    async () => (await createFixtureFile("plugin.txt", "not-an-archive")).filePath,
+    async (): Promise<string> => (await createFixtureFile("plugin.txt", "not-an-archive")).filePath,
   ],
 ] as const)("resolveArchiveSourcePath rejects %s", async (expected, resolvePath) => {
   expectPackError(await resolveArchiveSourcePath(await resolvePath()), [expected]);

@@ -37,17 +37,18 @@ export function ownRoster(
   });
   return {
     sessions,
-    watch(query: SessionListScope | (() => unknown)) {
+    watch(this: void, query: SessionListScope | (() => unknown)) {
       const stop = typeof query === "function" ? query : sessions.subscribeList(query, () => {});
       stops.push(stop);
       return stop;
     },
     resolveOnCleanup(
+      this: void,
       ...pending: Array<[ReturnType<typeof createDeferred<SessionsListResult>>, SessionsListResult]>
     ) {
       pending.forEach(([deferred, result]) => before.push(() => deferred.resolve(result)));
     },
-    settle(run: () => unknown) {
+    settle(this: void, run: () => unknown) {
       after.push(run);
     },
     listResult: (query: SessionListScope) => sessions.listSnapshot(query).result,

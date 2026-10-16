@@ -276,7 +276,7 @@ function expectNoLoggerMessageContaining(logger: ReturnType<typeof vi.fn>, fragm
 }
 
 async function expectNoStickyRetryWithSameDispatcher(params: {
-  resolved: ReturnType<typeof resolveTelegramFetchOrThrow>;
+  resolved: ReturnType<typeof resolveTelegramFetch>;
   expectedAgentCtor: typeof ProxyAgentCtor | typeof EnvHttpProxyAgentCtor;
   field: "connect" | "proxyTls" | "requestTls";
 }) {
@@ -411,7 +411,7 @@ describe("resolveTelegramFetch", () => {
     ProxyAgentCtor.mockClear();
     primeStickyFallbackRetry("EHOSTUNREACH", 1);
 
-    const resolved = resolveTelegramFetchOrThrow(proxyFetch, {
+    const resolved = resolveTelegramFetch(proxyFetch, {
       network: {
         autoSelectFamily: true,
         dnsResultOrder: "ipv4first",

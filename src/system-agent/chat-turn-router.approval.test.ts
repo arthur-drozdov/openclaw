@@ -16,7 +16,7 @@ import { ChatTurnRouter } from "./chat-turn-router.js";
 import { ChatWizardHost } from "./chat-wizard-host.js";
 import { describeSystemAgentPersistentOperation } from "./operations.js";
 
-type EngineOptions = ConstructorParameters<typeof SystemAgentChatEngine>[0];
+type EngineOptions = NonNullable<ConstructorParameters<typeof SystemAgentChatEngine>[0]>;
 function createEngine(options: EngineOptions = {}) {
   return new SystemAgentChatEngine({
     ...options,

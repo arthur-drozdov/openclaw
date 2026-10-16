@@ -103,11 +103,11 @@ export function requireExecutorHarness(runtime: PluginRuntime) {
   plugin.register(createTestPluginApi({ id: "agentsapi", runtime, registerAgentHarness }));
   const harness = registerAgentHarness.mock.calls[0]?.[0];
   assert(
-    harness?.runAttempt &&
-      harness.reset &&
-      harness.withSessionDeletion &&
-      harness.withSessionContextReset &&
-      harness.dispose,
+    typeof harness?.runAttempt === "function" &&
+      typeof harness.reset === "function" &&
+      typeof harness.withSessionDeletion === "function" &&
+      typeof harness.withSessionContextReset === "function" &&
+      typeof harness.dispose === "function",
     "The Agents API harness requires run, reset, deletion, context reset, and disposal",
   );
   const mutationHook =

@@ -21,7 +21,7 @@ import type { PluginRuntime } from "./runtime/types.js";
 type RunParams = Parameters<PluginRuntime["agent"]["runEmbeddedAgent"]>[0];
 const runDefaults = { workspaceDir: "/tmp", prompt: "continue", timeoutMs: 1, runId: "run-1" };
 const reject = (pending: Promise<unknown>, error: string) => expect(pending).rejects.toThrow(error);
-const match = (pending: Promise<unknown>, expected: unknown) =>
+const match = (pending: Promise<unknown>, expected: object) =>
   expect(pending).resolves.toMatchObject(expected);
 const admitted = (pending: Promise<unknown>) => expect(pending).resolves.toBe("admitted");
 

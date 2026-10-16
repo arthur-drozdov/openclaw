@@ -499,9 +499,10 @@ describe("Agents API attempt environment selection", () => {
     },
   );
   it("explains the missing self-hosted attachment provider", async () => {
-    const { result } = await attempt("self_hosted", undefined, undefined, [
-      { path: "/fixture/input.txt" },
-    ]);
+    const { result } = await attempt({
+      environment: "self_hosted",
+      media: [{ path: "/fixture/input.txt" }],
+    });
 
     expect(result).toMatchObject({
       terminal: {
@@ -519,9 +520,11 @@ describe("Agents API attempt environment selection", () => {
     const source = path.join(fixture.gatewayRoot, "private-project-file.txt");
     await fs.writeFile(source, "private project bytes");
     try {
-      const { result } = await attempt("self_hosted", undefined, fixture.gatewayRoot, [
-        { path: source, fileName: "import-job.log" },
-      ]);
+      const { result } = await attempt({
+        environment: "self_hosted",
+        workspaceDir: fixture.gatewayRoot,
+        media: [{ path: source, fileName: "import-job.log" }],
+      });
 
       expect(result).toMatchObject({
         terminal: {
