@@ -77,11 +77,6 @@ function useGatewayConfig() {
   return config;
 }
 
-async function replyWithToken(engine: SystemAgentChatEngine) {
-  expect((await engine.handle("connect telegram")).text).toContain("Bot token");
-  return engine.handle("123:abc");
-}
-
 function channelConfig(): OpenClawConfig {
   return {
     agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
@@ -142,45 +137,6 @@ describe("SystemAgentChatEngine runtime", () => {
       }
     },
   );
-
-  it("hosts a channel setup wizard as chat turns", async () => {
-    useTempStateDir();
-    const wizardRuns: string[] = [];
-    const engine = createEngine({
-      runChannelSetupWizard: async (channel: string, prompter: WizardPrompter) => {
-        wizardRuns.push(channel);
-        const token = await prompter.text({ message: "Bot token" });
-        wizardRuns.push(`token:${token}`);
-        const mode = await prompter.select({
-          message: "DM mode",
-          options: [
-            { value: "pair", label: "Pairing" },
-            { value: "open", label: "Open" },
-          ],
-        });
-        wizardRuns.push(`mode:${mode}`);
-      },
-    });
-
-    // Starting the wizard is not a write: it begins immediately, no approval step.
-    const tokenStep = await engine.handle("connect telegram");
-    expect(tokenStep.text).toContain("Bot token");
-    expect(tokenStep.question).toBeUndefined();
-
-    const modeStep = await engine.handle("123:abc");
-    expect(modeStep.text).toContain("1. Pairing");
-    expect(modeStep.question).toEqual({
-      id: expect.any(String),
-      header: "Choose one",
-      question: "DM mode",
-      options: [{ label: "Pairing" }, { label: "Open" }],
-    });
-
-    const done = await engine.handle("Open");
-    expect(done.text).toContain("telegram is configured");
-    expect(done.question).toBeUndefined();
-    expect(wizardRuns).toEqual(["telegram", "token:123:abc", "mode:open"]);
-  });
 
   it("hosts the real skills setup flow and guards installs plus the final config write", async () => {
     const baseConfig: OpenClawConfig = {
@@ -468,132 +424,102 @@ describe("SystemAgentChatEngine runtime", () => {
       throw new Error("audit store is read-only");
     });
     const engine = createEngine({
-      runChannelSetupWizard: async () => {},
+      runChannelSetupWizard: async (channel) => {
+        expect(channel).toBe("telegram");
+      },
       appendAuditEntry,
     });
 
     const reply = await engine.handle("connect telegram");
 
     expect(reply.text).toContain("Done — telegram is configured.");
+    expect(reply.question).toBeUndefined();
     expect(reply.text).not.toContain("audit store is read-only");
     expect(appendAuditEntry).toHaveBeenCalledOnce();
   });
 
-  it("rejects a hosted channel commit after a concurrent inference-route change", async () => {
-    useTempStateDir();
-    const baseConfig: OpenClawConfig = {
-      agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
-      auth: {
-        profiles: { "openai:main": { provider: "openai", mode: "api_key" } },
-      },
-    };
-    let currentConfig = structuredClone(baseConfig);
-    let currentHash = "base-hash";
-    mocks.readSetupConfigFileSnapshot.mockImplementation(async () => ({
-      exists: true,
-      valid: true,
-      path: "/tmp/openclaw.json",
-      hash: currentHash,
-      config: structuredClone(currentConfig),
-      sourceConfig: structuredClone(currentConfig),
-      issues: [],
-    }));
-    useChannelSetup(async (config, prompter) => {
-      const token = await prompter.text({ message: "Bot token" });
-      return {
-        ...config,
-        channels: {
-          ...config.channels,
-          telegram: { botToken: token },
-        },
-      };
-    });
-    mocks.writeWizardConfigFile.mockImplementation(
-      async (nextConfig: OpenClawConfig, opts: { baseHash?: string }) => {
-        if (opts.baseHash !== currentHash) {
-          throw new Error("configuration changed during channel setup");
-        }
-        currentConfig = structuredClone(nextConfig);
-        currentHash = "committed-hash";
-        return hostedConfigFiles.write(nextConfig);
-      },
-    );
-    const engine = createEngine({ surface: "gateway" });
-
-    const tokenStep = await engine.handle("connect telegram");
-    expect(tokenStep.text).toContain("Bot token");
-
-    const concurrentConfig: OpenClawConfig = {
-      agents: { defaults: { model: { primary: "anthropic/claude-opus-4-8" } } },
-      auth: {
-        profiles: { "anthropic:main": { provider: "anthropic", mode: "api_key" } },
-      },
-    };
-    currentConfig = structuredClone(concurrentConfig);
-    currentHash = "concurrent-hash";
-
-    const stopped = await engine.handle("123:abc");
-
-    expect(stopped.text).toContain("Telegram setup stopped");
-    expect(stopped.text).toContain("configuration changed during channel setup");
-    expect(mocks.writeWizardConfigFile).toHaveBeenCalledWith(
-      expect.objectContaining({
-        channels: expect.objectContaining({ telegram: { botToken: "123:abc" } }),
-      }),
-      expect.objectContaining({
-        baseHash: "base-hash",
-      }),
-    );
-    expect(currentConfig).toEqual(concurrentConfig);
-  });
-
-  it.each(["write", "post-write hooks"] as const)(
-    "rechecks inference authority before hosted channel %s",
+  it.each(["config revision", "write", "post-write hooks"] as const)(
+    "rejects stale hosted channel authority at %s",
     async (phase) => {
       useTempStateDir();
+      const revisionConflict = phase === "config revision";
       const baseConfig = channelConfig();
+      if (revisionConflict) {
+        delete baseConfig.models;
+      }
       const changedConfig: OpenClawConfig = {
         agents: { defaults: { model: { primary: "anthropic/claude-opus-4-8" } } },
       };
-      const verifiedInference = await createAmbientVerifiedBinding(baseConfig);
+      if (revisionConflict) {
+        changedConfig.auth = {
+          profiles: { "anthropic:main": { provider: "anthropic", mode: "api_key" } },
+        };
+      }
       let currentConfig = structuredClone(baseConfig);
+      let currentHash = "base-hash";
       const hook = { channel: "telegram", accountId: "default", run: vi.fn() };
-      mocks.readSetupConfigFileSnapshot.mockResolvedValue({
-        ...setupSnapshot(structuredClone(baseConfig), "base-hash"),
-        sourceConfig: structuredClone(baseConfig),
-        path: "/tmp/openclaw.json",
-        issues: [],
+      mocks.readSetupConfigFileSnapshot.mockImplementation(async () => {
+        const config = revisionConflict ? currentConfig : baseConfig;
+        return {
+          ...setupSnapshot(structuredClone(config), currentHash),
+          sourceConfig: structuredClone(config),
+          path: "/tmp/openclaw.json",
+          issues: [],
+        };
       });
       useChannelSetup(async (config, prompter, options) => {
         const token = await prompter.text({ message: "Bot token" });
         if (phase === "write") {
           currentConfig = structuredClone(changedConfig);
-        } else {
+        } else if (phase === "post-write hooks") {
           options.onPostWriteHook?.(hook);
         }
         return {
           ...config,
-          channels: { telegram: { botToken: token } },
+          channels: { ...config.channels, telegram: { botToken: token } },
         };
       });
-      mocks.writeWizardConfigFile.mockImplementation(async (config: OpenClawConfig) => {
-        if (phase === "post-write hooks") {
-          currentConfig = structuredClone(changedConfig);
-        }
-        return hostedConfigFiles.write(config);
-      });
+      mocks.writeWizardConfigFile.mockImplementation(
+        async (config: OpenClawConfig, opts: { baseHash?: string }) => {
+          if (revisionConflict && opts.baseHash !== currentHash) {
+            throw new Error("configuration changed during channel setup");
+          }
+          currentConfig = structuredClone(phase === "post-write hooks" ? changedConfig : config);
+          if (revisionConflict) {
+            currentHash = "committed-hash";
+          }
+          return hostedConfigFiles.write(config);
+        },
+      );
       const engine = createEngine({
         surface: "gateway",
-        verifiedInference,
-        deps: {
-          readConfigFileSnapshot: vi.fn(async () => configSnapshot(currentConfig)) as never,
-        },
+        ...(!revisionConflict && {
+          verifiedInference: await createAmbientVerifiedBinding(baseConfig),
+          deps: {
+            readConfigFileSnapshot: vi.fn(async () => configSnapshot(currentConfig)) as never,
+          },
+        }),
       });
-
-      const stopped = await replyWithToken(engine);
+      const tokenStep = await engine.handle("connect telegram");
+      expect(tokenStep.text).toContain("Bot token");
+      expect(tokenStep.question).toBeUndefined();
+      if (revisionConflict) {
+        currentConfig = structuredClone(changedConfig);
+        currentHash = "concurrent-hash";
+      }
+      const stopped = await engine.handle("123:abc");
 
       expect(stopped.text).toContain("Telegram setup stopped");
-      if (phase === "write") {
+      if (revisionConflict) {
+        expect(stopped.text).toContain("configuration changed during channel setup");
+        expect(mocks.writeWizardConfigFile).toHaveBeenCalledWith(
+          expect.objectContaining({
+            channels: expect.objectContaining({ telegram: { botToken: "123:abc" } }),
+          }),
+          expect.objectContaining({ baseHash: "base-hash" }),
+        );
+        expect(currentConfig).toEqual(changedConfig);
+      } else if (phase === "write") {
         expect(mocks.writeWizardConfigFile).not.toHaveBeenCalled();
       } else {
         expect(mocks.writeWizardConfigFile).toHaveBeenCalledOnce();

@@ -48,8 +48,7 @@ it("refuses memory import before provider discovery when the default workspace i
 });
 
 it("rechecks inference authority immediately before a hosted memory copy", async () => {
-  const workspace = useTempStateDir();
-  const baseConfig = prepareMemoryConfig(workspace);
+  const baseConfig = prepareMemoryConfig(useTempStateDir());
   const changedConfig: OpenClawConfig = {
     agents: { defaults: { model: { primary: "anthropic/claude-opus-4-8" } } },
   };
@@ -86,73 +85,63 @@ it("rechecks inference authority immediately before a hosted memory copy", async
   expect(copyEffect).not.toHaveBeenCalled();
 });
 
-it.each(["empty", "failed", "partial", "audit-failure"] as const)(
-  "reports %s without misrepresenting progress",
-  async (kind) => {
-    const provider = { providerId: "codex", label: "Codex" };
-    const result: SetupMemoryImportOutcome =
-      kind === "empty"
-        ? { status: "nothing-to-import", providers: [] }
-        : {
-            status: "completed",
-            providers:
-              kind === "failed"
-                ? ["Codex", "Claude"].map((label) => ({
-                    providerId: label.toLowerCase(),
-                    label,
-                    migrated: 0,
-                    skipped: 0,
-                    failure: "copy failed",
-                  }))
-                : kind === "partial"
-                  ? [{ ...provider, failure: "failed", copiesIndeterminate: true }]
-                  : [{ ...provider, migrated: 1, skipped: 0 }],
-          };
-    const command =
-      kind === "empty"
-        ? "import memories"
-        : kind === "audit-failure"
-          ? "import memory"
-          : "memory import";
-    const expected = {
-      empty: "Nothing to import",
-      failed: "Memory import did not complete",
-      partial: "Memory import failed partway",
-      "audit-failure": "Imported 1 item from Codex.",
-    }[kind];
-    const appendAuditEntry = vi.fn(async () => {
-      if (kind === "audit-failure") {
-        throw new Error("audit store is read-only");
-      }
-      return "state/openclaw.sqlite";
-    });
-    const reply = await createEngine({
-      appendAuditEntry,
-      runMemoryImportWizard: async () => result,
-    }).handle(command);
-    expect(reply.text).toContain(expected);
-    if (kind === "empty" || kind === "failed") {
-      expect(reply.text).not.toContain("Done");
-      expect(appendAuditEntry).not.toHaveBeenCalled();
-      if (kind === "empty") {
-        expect(mocks.writeWizardConfigFile).not.toHaveBeenCalled();
-      } else {
-        expect(reply.text).toContain("Failed providers: Codex, Claude");
-      }
-    } else if (kind === "partial") {
-      expect(reply.text).toContain("Some files may have been copied before the failure");
-      expect(reply.text).not.toContain("No files were copied");
-      expect(appendAuditEntry).toHaveBeenCalledWith({
-        operation: "memory.import",
-        summary: "Memory import failed partway via chat: Codex (copy count indeterminate)",
-        details: {
-          confirmedItems: 0,
-          copiesIndeterminate: true,
-          providers: [{ providerId: "codex", copiesIndeterminate: true }],
-        },
-      });
-    } else {
-      expect(reply.text).not.toContain("audit store is read-only");
+it.each([
+  ["empty", "import memories", "Nothing to import"],
+  ["failed", "memory import", "Memory import did not complete"],
+  ["partial", "memory import", "Memory import failed partway"],
+  ["audit-failure", "import memory", "Imported 1 item from Codex."],
+] as const)("reports %s without misrepresenting progress", async (kind, command, expected) => {
+  const provider = { providerId: "codex", label: "Codex" };
+  const result: SetupMemoryImportOutcome =
+    kind === "empty"
+      ? { status: "nothing-to-import", providers: [] }
+      : {
+          status: "completed",
+          providers:
+            kind === "failed"
+              ? ["Codex", "Claude"].map((label) => ({
+                  providerId: label.toLowerCase(),
+                  label,
+                  migrated: 0,
+                  skipped: 0,
+                  failure: "copy failed",
+                }))
+              : kind === "partial"
+                ? [{ ...provider, failure: "failed", copiesIndeterminate: true }]
+                : [{ ...provider, migrated: 1, skipped: 0 }],
+        };
+  const appendAuditEntry = vi.fn(async () => {
+    if (kind === "audit-failure") {
+      throw new Error("audit store is read-only");
     }
-  },
-);
+    return "state/openclaw.sqlite";
+  });
+  const reply = await createEngine({
+    appendAuditEntry,
+    runMemoryImportWizard: async () => result,
+  }).handle(command);
+  expect(reply.text).toContain(expected);
+  if (kind === "empty" || kind === "failed") {
+    expect(reply.text).not.toContain("Done");
+    expect(appendAuditEntry).not.toHaveBeenCalled();
+    if (kind === "empty") {
+      expect(mocks.writeWizardConfigFile).not.toHaveBeenCalled();
+    } else {
+      expect(reply.text).toContain("Failed providers: Codex, Claude");
+    }
+  } else if (kind === "partial") {
+    expect(reply.text).toContain("Some files may have been copied before the failure");
+    expect(reply.text).not.toContain("No files were copied");
+    expect(appendAuditEntry).toHaveBeenCalledWith({
+      operation: "memory.import",
+      summary: "Memory import failed partway via chat: Codex (copy count indeterminate)",
+      details: {
+        confirmedItems: 0,
+        copiesIndeterminate: true,
+        providers: [{ providerId: "codex", copiesIndeterminate: true }],
+      },
+    });
+  } else {
+    expect(reply.text).not.toContain("audit store is read-only");
+  }
+});
