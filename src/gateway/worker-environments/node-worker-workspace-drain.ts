@@ -107,10 +107,13 @@ export async function stopNodeWorkerWorkspaceOwner(
     owner.executionMode === "worker-turn" && reason === undefined
       ? run("stop", stopNodeWorkerWorkspaceEnvironment)
       : undefined;
-  await joinWorkerTunnelStops([remoteStop, owner.drainLocalWork?.()]);
-  if (reason !== "provider-destroying" && reason !== "provider-destroyed") {
-    await run("drain", drainNodeWorkerWorkspace);
-  }
+  const stopped = joinWorkerTunnelStops([remoteStop, owner.drainLocalWork?.()]);
+  // Older nodes can still drain workspace work when native environment stop is unavailable.
+  const drain = () =>
+    reason !== "provider-destroying" && reason !== "provider-destroyed"
+      ? run("drain", drainNodeWorkerWorkspace)
+      : undefined;
+  await joinWorkerTunnelStops([stopped, stopped.then(drain, drain)]);
 }
 
 /** Cancellation is only a request. This acknowledgement joins the node's physical workspace queue. */

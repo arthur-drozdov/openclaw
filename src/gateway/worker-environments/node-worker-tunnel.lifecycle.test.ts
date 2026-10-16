@@ -96,6 +96,48 @@ function turnClaim() {
 }
 
 describe("node worker tunnel lifetime", () => {
+  it("joins supported workspace drain when the node cannot stop its environment", async ({
+    signal,
+  }) => {
+    const nodeTransport = transport();
+    const nodes = await nodeTransport.listCurrentNodes();
+    delete nodes[0]!.workerHost.environmentSession;
+    nodeTransport.listCurrentNodes = async () => nodes;
+    const entered = createDeferred();
+    const release = createDeferred();
+    nodeTransport.invoke = async (request) => {
+      const input = parseNodeWorkerWorkspaceExecInput(JSON.stringify(request.params));
+      expect(input.argv).toEqual([NODE_WORKSPACE_DRAIN_COMMAND]);
+      entered.resolve();
+      await release.promise;
+      return {
+        ok: true,
+        payloadJSON: workspaceCommandPayload("/node/workspace", { stdout: "drained\n" }),
+      };
+    };
+    const transfers = workspaceTransfer({ closeAll: vi.fn(async () => {}) });
+    const manager = createManager(environment(), {
+      getTransport: () => nodeTransport,
+      workspaceTransfer: transfers,
+    });
+    const stopping = manager.stopAll().catch((error: unknown) => error);
+    try {
+      expect(
+        await withinTest(
+          Promise.race([entered.promise.then(() => "drain"), stopping.then(() => "stopped")]),
+          signal,
+        ),
+      ).toBe("drain");
+      expect(transfers.close).not.toHaveBeenCalled();
+      release.resolve();
+      expect(await stopping).toMatchObject({ code: "node_runner_update_required" });
+      expect(transfers.close).toHaveBeenCalledOnce();
+    } finally {
+      release.resolve();
+      await stopping;
+    }
+  });
+
   it.each([8_000, 30_000])(
     "shares the %i ms shutdown budget across remote stop and drain without renewing it",
     async (budgetMs) => {
