@@ -2,7 +2,6 @@ import Foundation
 import Network
 import Observation
 import OpenClawKit
-import OSLog
 
 @MainActor
 @Observable
@@ -89,7 +88,6 @@ public final class GatewayDiscoveryModel {
     private var wideAreaFallback: (domain: String, beacons: [WideAreaGatewayBeacon])?
     private var tailscaleServeFallbackTask: Task<Void, Never>?
     private var tailscaleServeFallbackBeacons: [TailscaleServeGatewayBeacon] = []
-    private let logger = Logger(subsystem: "ai.openclaw", category: "gateway-discovery")
 
     public init(
         localDisplayName: String? = nil,
