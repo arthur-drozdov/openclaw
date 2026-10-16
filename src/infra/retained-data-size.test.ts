@@ -16,13 +16,13 @@ it("counts shared data once without invoking accessors or serializing contents",
   expect(measured.approximateBytes).toBeLessThan(
     estimateRetainedDataSize([{ left: { ...shared }, right: { ...shared } }]).approximateBytes,
   );
-  expect(measured.truncated).toBe(false);
+  expect(measured.truncated).toBe(true);
   expect(JSON.stringify(measured)).not.toContain(shared.payload);
 });
 
 it("bounds cyclic, deep, and broad retained structures", () => {
-  const cycle = new Map<unknown, unknown>();
-  cycle.set(cycle, new Set([cycle]));
+  const cycle: { self?: unknown } = {};
+  cycle.self = cycle;
   expect(estimateRetainedDataSize([cycle]).truncated).toBe(false);
   expect(estimateRetainedDataSize([Array(100_001).fill(0)]).truncated).toBe(true);
   let deep: unknown = null;

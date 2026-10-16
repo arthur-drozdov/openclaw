@@ -87,6 +87,26 @@ describe("provider-catalog-shared live catalog cache", () => {
     ]);
   });
 
+  it("samples cached plugin data without invoking proxy traps or custom iterators", async () => {
+    const executePlugin = vi.fn(() => {
+      throw new Error("diagnostics invoked plugin behavior");
+    });
+    const opaque = new Proxy({}, { ownKeys: executePlugin });
+    const collections = [new Map<string, string>(), new Set<string>(), ["model"]].map((value) =>
+      Object.defineProperty(value, Symbol.iterator, { value: executePlugin }),
+    );
+    const payload = { opaque, collections };
+    await expect(
+      getCachedLiveCatalogValue({ keyParts: ["opaque-plugin-data"], load: async () => payload }),
+    ).resolves.toBe(payload);
+    expect(getLiveCatalogRetainedData()[0]).toMatchObject({
+      structure: "catalog-source",
+      entries: 1,
+      truncated: true,
+    });
+    expect(executePlugin).not.toHaveBeenCalled();
+  });
+
   it("does not admit a cancelled catalog consumer", async () => {
     const reason = new Error("catalog owner closed");
     const load = vi.fn(async () => "unexpected");
