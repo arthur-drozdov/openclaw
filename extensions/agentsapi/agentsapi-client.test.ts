@@ -1,3 +1,4 @@
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AgentsApiClient,
@@ -32,27 +33,26 @@ describe("Agents API self-hosted session connection", () => {
         workspace_directory: "/fixture/workspace",
         remote_url: "wss://executor.invalid/session-fixture",
       };
-      fetchWithSsrFGuardMock.mockImplementation(async () => ({
-        response: Response.json({
-          id: "session-fixture",
-          status: "requires_action",
-          error: null,
-          environment,
-          required_actions: [
-            { type: "environment_connection", environment_id: "environment-fixture" },
-            {
-              type: "function_call",
-              turn_id: "turn-fixture",
-              call_id: "call-fixture",
-              name: "fixture_tool",
-              arguments: {},
-            },
-          ],
-        }),
-        finalUrl: "https://api.openai.com/v1/agents/sessions/session-fixture",
-        release: async () => {},
-      }));
-      const client = new AgentsApiClient("fixture-not-a-real-api-key", vi.fn());
+      const functionCall = {
+        type: "function_call",
+        turn_id: "turn-fixture",
+        call_id: "call-fixture",
+        name: "fixture_tool",
+        arguments: {},
+      };
+      const session = {
+        id: "session-fixture",
+        status: "requires_action",
+        error: null,
+        environment,
+        required_actions: [
+          { type: "environment_connection", environment_id: "environment-fixture" },
+          functionCall,
+        ],
+      };
+      queueJson(session);
+      queueJson(session);
+      const client = createClient();
       expect((await client.session("session-fixture", signal)).environment).toEqual(environment);
       const connect = vi.fn(async () => {});
       expect(
@@ -61,15 +61,7 @@ describe("Agents API self-hosted session connection", () => {
           signal,
           controlled ? connect : undefined,
         ),
-      ).toEqual([
-        {
-          type: "function_call",
-          turn_id: "turn-fixture",
-          call_id: "call-fixture",
-          name: "fixture_tool",
-          arguments: {},
-        },
-      ]);
+      ).toEqual([functionCall]);
       expect(connect.mock.calls).toEqual(controlled ? [["environment-fixture"]] : []);
     },
   );
@@ -80,23 +72,19 @@ describe("Agents API self-hosted session connection", () => {
   ])(
     "rejects unsupported connection actions for $type/$requestedId",
     async ({ type, requestedId }) => {
-      fetchWithSsrFGuardMock.mockResolvedValue({
-        response: Response.json({
-          id: "session-fixture",
-          status: "requires_action",
-          error: null,
-          environment: {
-            type,
-            id: "environment-fixture",
-            workspace_directory: "/fixture/workspace",
-            remote_url: "wss://executor.invalid/session-fixture",
-          },
-          required_actions: [{ type: "environment_connection", environment_id: requestedId }],
-        }),
-        finalUrl: "https://api.openai.com/v1/agents/sessions/session-fixture",
-        release: async () => {},
+      queueJson({
+        id: "session-fixture",
+        status: "requires_action",
+        error: null,
+        environment: {
+          type,
+          id: "environment-fixture",
+          workspace_directory: "/fixture/workspace",
+          remote_url: "wss://executor.invalid/session-fixture",
+        },
+        required_actions: [{ type: "environment_connection", environment_id: requestedId }],
       });
-      const client = new AgentsApiClient("fixture-not-a-real-api-key", vi.fn());
+      const client = createClient();
       const connect = vi.fn(async () => {});
       await expect(client.pendingFunctionCalls("session-fixture", signal, connect)).rejects.toThrow(
         "cannot reconnect an environment_connection",
@@ -108,8 +96,8 @@ describe("Agents API self-hosted session connection", () => {
 
 describe("Agents API session creation", () => {
   it("keeps Gateway functions and MCP tools when native search is disabled", async () => {
-    queueResponse(Response.json({ id: "session-fixture" }));
-    const client = new AgentsApiClient("fixture-not-a-real-api-key", vi.fn());
+    queueJson({ id: "session-fixture" });
+    const client = createClient();
     const gatewayFunction = {
       type: "function" as const,
       name: "message",
@@ -139,8 +127,8 @@ describe("Agents API session creation", () => {
       "User-Agent: fixture-client/1.0\nX-Attribution-Fixture: preserved",
     );
     const model = "future-model";
-    queueResponse(Response.json({ id: "session-fixture" }));
-    const client = new AgentsApiClient("fixture-not-a-real-api-key", vi.fn());
+    queueJson({ id: "session-fixture" });
+    const client = createClient();
 
     await expect(client.create(signal, "Fixture instructions", model)).resolves.toBe(
       "session-fixture",
@@ -150,12 +138,14 @@ describe("Agents API session creation", () => {
     const request = requestAt(0);
     const body: unknown = await request.json();
     expect(request.method).toBe("POST");
-    expect(request.headers.get("user-agent")).toBe("openclaw/2026.9.1");
-    expect(request.headers.get("originator")).toBe("openclaw");
-    expect(request.headers.get("version")).toBe("2026.9.1");
-    expect(request.headers.get("authorization")).toBe("Bearer fixture-not-a-real-api-key");
-    expect(request.headers.get("x-stainless-lang")).toBe("js");
-    expect(request.headers.get("x-attribution-fixture")).toBe("preserved");
+    expect(Object.fromEntries(request.headers)).toMatchObject({
+      "user-agent": "openclaw/2026.9.1",
+      originator: "openclaw",
+      version: "2026.9.1",
+      authorization: "Bearer fixture-not-a-real-api-key",
+      "x-stainless-lang": "js",
+      "x-attribution-fixture": "preserved",
+    });
     expect(body).toMatchObject({
       agent: { model },
     });
@@ -272,7 +262,7 @@ const dormantUploadMessage =
 describe("Agents API file upload transport", () => {
   it("uploads through the reused session's connected environment and verifies its receipt", async () => {
     queueUploadContext();
-    queueResponse(Response.json(uploadReceipt));
+    queueJson(uploadReceipt);
 
     await expect(
       createClient().uploadFile("session-fixture", inputFile, new AbortController().signal),
@@ -312,11 +302,9 @@ describe("Agents API file upload transport", () => {
 
   it("reports unavailable when a connected environment becomes dormant before upload", async () => {
     queueUploadContext();
-    queueResponse(
-      Response.json(
-        { error: { type: "conflict_error", message: dormantUploadMessage } },
-        { status: 409 },
-      ),
+    queueJson(
+      { error: { type: "conflict_error", message: dormantUploadMessage } },
+      { status: 409 },
     );
 
     await expect(createClient().uploadFile("session-fixture", inputFile, signal)).resolves.toEqual({
@@ -351,7 +339,7 @@ describe("Agents API file upload transport", () => {
     },
   ])("preserves an upload $name", async ({ status, type, message }) => {
     queueUploadContext();
-    queueResponse(Response.json({ error: { type, message } }, { status }));
+    queueJson({ error: { type, message } }, { status });
 
     await expect(
       createClient().uploadFile("session-fixture", inputFile, signal),
@@ -365,11 +353,9 @@ describe("Agents API file upload transport", () => {
       const controller = new AbortController();
       const interrupted = new Error("File upload authority ended");
       let current = true;
-      const release = queueResponse(
-        Response.json(
-          { error: { type: "conflict_error", message: dormantUploadMessage } },
-          { status: 409 },
-        ),
+      const release = queueJson(
+        { error: { type: "conflict_error", message: dormantUploadMessage } },
+        { status: 409 },
       );
       release.mockImplementation(async () => {
         if (interruption === "abort") {
@@ -397,7 +383,7 @@ describe("Agents API file upload transport", () => {
     { name: "decoded byte count", patch: { size_bytes: 5 } },
   ])("rejects an upload receipt with a different $name", async ({ patch }) => {
     queueUploadContext();
-    queueResponse(Response.json({ ...uploadReceipt, ...patch }));
+    queueJson({ ...uploadReceipt, ...patch });
 
     await expect(createClient().uploadFile("session-fixture", inputFile, signal)).rejects.toThrow(
       "did not match the requested environment, path, or size",
@@ -410,8 +396,8 @@ describe("Agents API immutable artifact metadata", () => {
     const first = artifact({ id: "artifact-first" });
     const previousTurn = artifact({ id: "artifact-previous", turn_id: "turn-previous" });
     const last = artifact({ id: "artifact-last" });
-    queueResponse(Response.json({ data: [first, previousTurn], has_more: true }));
-    queueResponse(Response.json({ data: [last], has_more: false }));
+    queueJson({ data: [first, previousTurn], has_more: true });
+    queueJson({ data: [last], has_more: false });
 
     await expect(
       createClient().artifacts("session-fixture", "turn-fixture", signal),
@@ -424,12 +410,10 @@ describe("Agents API immutable artifact metadata", () => {
   });
 
   it("rejects a foreign session artifact even when it belongs to a different turn", async () => {
-    queueResponse(
-      Response.json({
-        data: [artifact({ session_id: "session-other", turn_id: "turn-previous" })],
-        has_more: false,
-      }),
-    );
+    queueJson({
+      data: [artifact({ session_id: "session-other", turn_id: "turn-previous" })],
+      has_more: false,
+    });
 
     await expect(
       createClient().artifacts("session-fixture", "turn-fixture", signal),
@@ -438,9 +422,9 @@ describe("Agents API immutable artifact metadata", () => {
 
   it.each(["empty", "repeated"])("stops a %s continuation page", async (kind) => {
     if (kind === "repeated") {
-      queueResponse(Response.json({ data: [artifact()], has_more: true }));
+      queueJson({ data: [artifact()], has_more: true });
     }
-    queueResponse(Response.json({ data: kind === "empty" ? [] : [artifact()], has_more: true }));
+    queueJson({ data: kind === "empty" ? [] : [artifact()], has_more: true });
 
     await expect(
       createClient().artifacts("session-fixture", "turn-fixture", signal),
@@ -454,7 +438,7 @@ describe("Agents API immutable artifact metadata", () => {
     { name: "subagent turn", patch: { subagent_id: "subagent-fixture" } },
   ])("rejects a $name before accepting its output metadata", async ({ patch }) => {
     const savedTurn = createTurn(patch);
-    queueResponse(Response.json(savedTurn));
+    queueJson(savedTurn);
     const result = createClient().turn("session-fixture", "turn-fixture", signal);
 
     await expect(result).rejects.toThrow("turn outside the requested root session");
@@ -489,7 +473,7 @@ describe("Agents API immutable artifact download", () => {
     "cancels an unfinished content body after %s and releases its request",
     async (interruption) => {
       const controller = new AbortController();
-      const contentRequested = deferred<void>();
+      const contentRequested = createDeferred<void>();
       const cancel = vi.fn();
       let content!: ReadableStreamDefaultController<Uint8Array>;
       let current = true;
@@ -567,20 +551,16 @@ function queueResponse(response: Response) {
 }
 
 function queueUploadContext(environment: { id?: string; status?: string } = {}) {
-  queueResponse(
-    Response.json({
-      id: "session-fixture",
-      environment: { type: "openai_hosted", id: "environment-fixture" },
-    }),
-  );
-  queueResponse(
-    Response.json({
-      id: "environment-fixture",
-      type: "openai_hosted",
-      status: "connected",
-      ...environment,
-    }),
-  );
+  queueJson({
+    id: "session-fixture",
+    environment: { type: "openai_hosted", id: "environment-fixture" },
+  });
+  queueJson({
+    id: "environment-fixture",
+    type: "openai_hosted",
+    status: "connected",
+    ...environment,
+  });
 }
 
 function requestAt(index: number) {
@@ -604,12 +584,8 @@ function artifact(overrides: Partial<AgentsApiArtifact> = {}): AgentsApiArtifact
   };
 }
 
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((settle) => {
-    resolve = settle;
-  });
-  return { promise, resolve };
+function queueJson(body: unknown, init?: ResponseInit) {
+  return queueResponse(Response.json(body, init));
 }
 
 function serverError(status: number, headers?: HeadersInit) {

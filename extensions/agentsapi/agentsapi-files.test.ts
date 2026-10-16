@@ -38,6 +38,10 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+function prepare(media: Parameters<typeof prepareInputs>[0]) {
+  return prepareInputs(media, workspaceDir, () => {}, signal);
+}
+
 describe("Agents API input attachment custody", () => {
   it("copies managed bytes and keeps untrusted names inside an escaped attachment mapping", async () => {
     const bytes = Buffer.from([0, 255, 13, 10, 128]);
@@ -45,15 +49,10 @@ describe("Agents API input attachment custody", () => {
     const outbound = await saveMediaBuffer(Buffer.from("previous output"), undefined, "outbound");
     const name = '../../deliver\n"escape".bin';
 
-    const prepared = await prepareInputs(
-      [
-        { url: `media://inbound/${inbound.id}`, fileName: name },
-        { path: outbound.path, fileName: "previous.txt" },
-      ],
-      workspaceDir,
-      () => {},
-      signal,
-    );
+    const prepared = await prepare([
+      { url: `media://inbound/${inbound.id}`, fileName: name },
+      { path: outbound.path, fileName: "previous.txt" },
+    ]);
 
     expect(prepared.files).toHaveLength(2);
     expect(Buffer.from(prepared.files[0]!.data, "base64")).toEqual(bytes);
@@ -82,18 +81,13 @@ describe("Agents API input attachment custody", () => {
           ? await saveMediaBuffer(originalBytes, undefined, "inbound")
           : undefined;
 
-      const prepared = await prepareInputs(
-        [
-          {
-            path: stagedPath,
-            workspaceDir,
-            ...(managed ? { url: `media://inbound/${managed.id}` } : {}),
-          },
-        ],
-        workspaceDir,
-        () => {},
-        signal,
-      );
+      const prepared = await prepare([
+        {
+          path: stagedPath,
+          workspaceDir,
+          ...(managed ? { url: `media://inbound/${managed.id}` } : {}),
+        },
+      ]);
 
       expect(prepared.files).toHaveLength(1);
       expect(Buffer.from(prepared.files[0]!.data, "base64")).toEqual(
@@ -117,18 +111,13 @@ describe("Agents API input attachment custody", () => {
       await fs.writeFile(filePath, "private project bytes");
 
       await expect(
-        prepareInputs(
-          [
-            {
-              path: filePath,
-              workspaceDir: source === "different workspace" ? stateDir : workspaceDir,
-              staged: true,
-            },
-          ],
-          workspaceDir,
-          () => {},
-          signal,
-        ),
+        prepare([
+          {
+            path: filePath,
+            workspaceDir: source === "different workspace" ? stateDir : workspaceDir,
+            staged: true,
+          },
+        ]),
       ).rejects.toThrow(
         source === "different workspace"
           ? "requires a host-prepared managed media source"
@@ -144,19 +133,14 @@ describe("Agents API input attachment custody", () => {
     await fs.writeFile(foreignPath, "foreign bytes");
 
     await expect(
-      prepareInputs(
-        [
-          {
-            path: foreignPath,
-            url: `media://inbound/${saved.id}`,
-            workspaceDir,
-            sizeBytes: fileLimit + 1,
-          },
-        ],
-        workspaceDir,
-        () => {},
-        signal,
-      ),
+      prepare([
+        {
+          path: foreignPath,
+          url: `media://inbound/${saved.id}`,
+          workspaceDir,
+          sizeBytes: fileLimit + 1,
+        },
+      ]),
     ).rejects.toThrow("does not match its managed media identity");
   });
 
@@ -165,29 +149,12 @@ describe("Agents API input attachment custody", () => {
     const full = await saveMediaBuffer(bytes, undefined, "inbound");
     const extra = await saveMediaBuffer(Buffer.from("x"), undefined, "inbound");
     const fact = { path: full.path, sizeBytes: 1 };
-    const prepared = await prepareInputs([fact, fact], workspaceDir, () => {}, signal);
-    expect(prepared.files).toHaveLength(2);
-    for (const [index, file] of prepared.files.entries()) {
-      expect(Buffer.from(file.data, "base64").equals(bytes), `attachment ${index + 1} bytes`).toBe(
-        true,
-      );
-    }
+    const prepared = await prepare([fact, fact]);
+    expect(decodedFiles(prepared)).toEqual([bytes, bytes]);
 
     const smaller = await saveMediaBuffer(bytes.subarray(1), undefined, "inbound");
-    const partial = await prepareInputs(
-      [fact, { path: extra.path }, fact, { path: smaller.path }],
-      workspaceDir,
-      () => {},
-      signal,
-    );
-    const acceptedBytes = [bytes, Buffer.from("x"), bytes.subarray(1)];
-    expect(partial.files).toHaveLength(acceptedBytes.length);
-    for (const [index, file] of partial.files.entries()) {
-      expect(
-        Buffer.from(file.data, "base64").equals(acceptedBytes[index]!),
-        `accepted attachment ${index + 1} bytes`,
-      ).toBe(true);
-    }
+    const partial = await prepare([fact, { path: extra.path }, fact, { path: smaller.path }]);
+    expect(decodedFiles(partial)).toEqual([bytes, Buffer.from("x"), bytes.subarray(1)]);
     expect(
       JSON.parse(partial.mappingText.split("\n")[1]!).map(
         ({ attachment }: { attachment: number }) => attachment,
@@ -198,15 +165,8 @@ describe("Agents API input attachment custody", () => {
     );
 
     await fs.appendFile(full.path, "x");
-    const oversized = await prepareInputs(
-      [fact, { path: extra.path }],
-      workspaceDir,
-      () => {},
-      signal,
-    );
-    expect(oversized.files.map((file) => Buffer.from(file.data, "base64").toString())).toEqual([
-      "x",
-    ]);
+    const oversized = await prepare([fact, { path: extra.path }]);
+    expect(decodedFiles(oversized)).toEqual([Buffer.from("x")]);
     expect(oversized.feedbackText).toContain(
       '{"attachment":1,"reason":"exceeds the 5 MiB file limit"}',
     );
@@ -215,12 +175,7 @@ describe("Agents API input attachment custody", () => {
   it("transfers only the first 50 candidates and reports the unread remainder", async () => {
     const saved = await saveMediaBuffer(Buffer.from("x"), undefined, "inbound");
     const facts = Array.from({ length: 50 }, () => ({ path: saved.path }));
-    const prepared = await prepareInputs(
-      [...facts, { path: path.join(workspaceDir, "not-read.txt") }],
-      workspaceDir,
-      () => {},
-      signal,
-    );
+    const prepared = await prepare([...facts, { path: path.join(workspaceDir, "not-read.txt") }]);
     expect(prepared.files).toHaveLength(50);
     expect(new Set(prepared.files.map((file) => file.path)).size).toBe(50);
     expect(prepared.feedbackText).toContain(
@@ -232,9 +187,9 @@ describe("Agents API input attachment custody", () => {
     "rejects invalid size metadata %s without treating it as a limit omission",
     async (sizeBytes) => {
       const saved = await saveMediaBuffer(Buffer.from("x"), undefined, "inbound");
-      await expect(
-        prepareInputs([{ path: saved.path, sizeBytes }], workspaceDir, () => {}, signal),
-      ).rejects.toThrow("Agents API input attachment has an invalid size");
+      await expect(prepare([{ path: saved.path, sizeBytes }])).rejects.toThrow(
+        "Agents API input attachment has an invalid size",
+      );
     },
   );
 
@@ -259,6 +214,10 @@ describe("Agents API input attachment custody", () => {
     ).rejects.toBe(revocation);
   });
 });
+
+function decodedFiles(prepared: Awaited<ReturnType<typeof prepareInputs>>) {
+  return prepared.files.map((file) => Buffer.from(file.data, "base64"));
+}
 
 describe("Agents API output attachment publication", () => {
   let host: Awaited<ReturnType<typeof createAdmittedHostCapabilityTestFixture>>;

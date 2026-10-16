@@ -20,13 +20,17 @@ const legacy = {
   authFingerprint: "3c26b68488ce497a69d2c9fce9ee19c461fa67a3d959b0dc3bafe5718c56119d",
 };
 
-function migrationStore(env: NodeJS.ProcessEnv) {
-  return createPluginStateKeyedStoreForTests<StoredBinding>("agentsapi", {
+function migrationStore<T = StoredBinding>(env: NodeJS.ProcessEnv) {
+  return createPluginStateKeyedStoreForTests<T>("agentsapi", {
     namespace: "agentsapi-sessions",
     maxEntries: 100_000,
     overflowPolicy: "reject-new",
     env,
   });
+}
+
+function pluginConfig(config: Record<string, unknown>): OpenClawConfig {
+  return { plugins: { entries: { agentsapi: { config } } } };
 }
 
 /** Reuses the registered harness, SQLite fixture, and deterministic native transport. */
@@ -40,13 +44,7 @@ export function registerMigrationTests(
   it("upgrades a v2026.9.9 hosted binding without replacing its remote session", async () => {
     await withOpenClawTestState({ label: "agentsapi-stable-upgrade" }, async (state) => {
       const params = await createAttempt(state.stateDir);
-      const openStore = () =>
-        createPluginStateKeyedStoreForTests<unknown>("agentsapi", {
-          namespace: "agentsapi-sessions",
-          maxEntries: 100_000,
-          overflowPolicy: "reject-new",
-          env: state.env,
-        });
+      const openStore = () => migrationStore<unknown>(state.env);
       await openStore().register(params.sessionId, legacy);
       await reopenState();
       const { create, message, session } = mockClient("must-not-create");
@@ -89,21 +87,10 @@ export function registerMigrationTests(
       }> = [
         { name: "rotated key", params: { resolvedApiKey: "fixture-rotated-key" } },
         { name: "model", params: { model: { ...params.model, id: "different-model" } } },
-        {
-          name: "environment",
-          config: {
-            plugins: { entries: { agentsapi: { config: { environment: "self_hosted" } } } },
-          },
-        },
+        { name: "environment", config: pluginConfig({ environment: "self_hosted" }) },
         {
           name: "network",
-          config: {
-            plugins: {
-              entries: {
-                agentsapi: { config: { openai_host: { network: { access: "disabled" } } } },
-              },
-            },
-          },
+          config: pluginConfig({ openai_host: { network: { access: "disabled" } } }),
         },
         {
           name: "MCP",
@@ -120,17 +107,11 @@ export function registerMigrationTests(
         { name: "native search", params: { toolOverrides: { webSearch: false } } },
         {
           name: "Gateway forwarding",
-          config: {
-            plugins: {
-              entries: { agentsapi: { config: { forwarding: { gatewayTools: false } } } },
-            },
-          },
+          config: pluginConfig({ forwarding: { gatewayTools: false } }),
         },
         {
           name: "MCP forwarding",
-          config: {
-            plugins: { entries: { agentsapi: { config: { forwarding: { mcpServers: false } } } } },
-          },
+          config: pluginConfig({ forwarding: { mcpServers: false } }),
         },
       ];
       try {
@@ -154,12 +135,7 @@ export function registerMigrationTests(
   it("retains corrupt and partial binding rows before either resume or cleanup", async () => {
     await withOpenClawTestState({ label: "agentsapi-upgrade-corrupt" }, async (state) => {
       const params = await createAttempt(state.stateDir);
-      const store = createPluginStateKeyedStoreForTests<unknown>("agentsapi", {
-        namespace: "agentsapi-sessions",
-        maxEntries: 100_000,
-        overflowPolicy: "reject-new",
-        env: state.env,
-      });
+      const store = migrationStore<unknown>(state.env);
       const client = mockClient("must-not-create");
       const harness = registerHarness(state.env);
       const rows = [
@@ -317,9 +293,9 @@ export function registerMigrationTests(
       });
       const client = mockClient("must-not-create");
       client.session.mockResolvedValue({ ...createHostedSession(), id: row.sessionId });
-      const harness = registerHarness(state.env, () => ({
-        plugins: { entries: { agentsapi: { config: { environment: "self_hosted" } } } },
-      }));
+      const harness = registerHarness(state.env, () =>
+        pluginConfig({ environment: "self_hosted" }),
+      );
       try {
         expect(await harness.runAttempt(params)).toMatchObject({ terminal: { kind: "ok" } });
         const saved = await store.lookup(params.sessionId);

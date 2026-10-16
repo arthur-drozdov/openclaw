@@ -84,26 +84,9 @@ export async function executorFixture(state: { stateDir: string; env: NodeJS.Pro
       return controller;
     });
   const nativeSession: Awaited<ReturnType<AgentsApiClient["session"]>> = {
+    ...createHostedSession("requires_action"),
     id: "native-executor-session",
-    agent: {
-      id: "fixture-agent",
-      instructions: "Fixture instructions",
-      model: "fixture-model",
-      multi_agent: { enabled: false, max_concurrent_subagents: null },
-      name: null,
-      reasoning: { effort: null, summary: null },
-      service_tier: "auto",
-      text: { format: { type: "text" }, verbosity: "medium" },
-      tools: [],
-    },
-    created_at: 1,
-    last_active_at: 2,
-    metadata: {},
-    object: "agent.session",
-    status: "requires_action",
-    error: null,
-    usage: null,
-    vault_ids: [],
+    agent: { ...createHostedSession().agent, id: "fixture-agent" },
     environment: {
       id: "executor-environment",
       type: "self_hosted",

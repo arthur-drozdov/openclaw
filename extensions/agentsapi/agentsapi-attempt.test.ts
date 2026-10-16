@@ -3,7 +3,7 @@ import {
   queueAgentHarnessMessage,
   type AgentHarnessAttemptParamsV2,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
-import { AuthStorage, ModelRegistry, SessionManager } from "openclaw/plugin-sdk/agent-sessions";
+import { SessionManager } from "openclaw/plugin-sdk/agent-sessions";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { saveMediaBuffer } from "openclaw/plugin-sdk/media-store";
 import {
@@ -22,11 +22,12 @@ import { useSessionStoreTempDirs } from "openclaw/plugin-sdk/sqlite-runtime-test
 import { withOpenClawTestState } from "openclaw/plugin-sdk/test-state";
 import { afterAll, afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
 import { runAgentsApiAttempt, type AgentsApiPromptHistories } from "./agentsapi-attempt.js";
+import { createAttemptParams } from "./agentsapi-attempt.test-helpers.js";
 import type { AgentsApiBinding } from "./agentsapi-bindings.js";
 import { AgentsApiClient, type AgentsApiItem } from "./agentsapi-client.js";
 import { AgentsApiMessageProjection } from "./agentsapi-messages.js";
 import { recordAgentsApiNativeToolTranscript } from "./agentsapi-transcript.js";
-import { createHostedSession, createModel, createTurn } from "./agentsapi.test-support.js";
+import { createHostedSession, createTurn } from "./agentsapi.test-support.js";
 
 const { createSession, registerRun } = vi.hoisted(() => ({
   createSession: vi.fn<typeof import("./agentsapi-session.js").createAgentsApiSession>(),
@@ -659,42 +660,26 @@ async function createAttempt(pluginConfig: unknown = {}) {
       throw revocation;
     }
   };
-  const authStorage = AuthStorage.inMemory();
   const onPartialReply = vi.fn<NonNullable<AgentHarnessAttemptParamsV2["onPartialReply"]>>();
   const promptHistories: AgentsApiPromptHistories = new WeakMap();
   let binding: AgentsApiBinding | undefined;
-  const params: AgentHarnessAttemptParamsV2 = {
+  const params = createAttemptParams({
     ...target,
     sessionTarget: target,
     sessionFile: path.join(workspaceDir, "session.jsonl"),
     workspaceDir,
     agentDir: workspaceDir,
     config,
-    runId: "run-fixture",
     prompt: "Create an output file and summarize the result.",
     timeoutMs: 5_000,
     abortSignal: controller.signal,
-    provider: "openai",
-    modelId: "fixture-model",
-    model: createModel(),
-    resolvedApiKey: "fixture-not-a-real-api-key",
-    authStorage,
-    modelRegistry: ModelRegistry.inMemory(authStorage),
-    authProfileStore: { version: 1, profiles: {} },
-    thinkLevel: "off",
     disableTools: true,
     hostCapabilities: {
-      kind: "agent-harness-host-capability",
-      version: 1,
       assertActive: assertCurrent,
       createToolSurfaceAsync: async () => [],
-      bindToolSurface: (tools) => tools,
-      runBeforeToolCall: async (request) => ({ blocked: false, params: request.params }),
-      requestApproval: async () => undefined,
-      waitForApproval: async () => undefined,
     },
     onPartialReply,
-  };
+  });
   return {
     target,
     params,
