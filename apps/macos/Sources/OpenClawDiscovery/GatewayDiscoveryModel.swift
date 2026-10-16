@@ -467,19 +467,12 @@ public final class GatewayDiscoveryModel {
             name: serviceName,
             type: type,
             domain: domain,
-            resolve: { [logger] service in
+            resolve: { service in
                 let txt = service.txtRecordData().map {
                     NetService.dictionary(fromTXTRecord: $0).compactMapValues { String(data: $0, encoding: .utf8) }
                 } ?? [:]
                 let host = BonjourServiceResolverSupport.normalizeHost(service.hostName)
                 let port = service.port > 0 ? service.port : nil
-                if !txt.isEmpty {
-                    let payload = txt.sorted(by: { $0.key < $1.key })
-                        .map { "\($0.key)=\($0.value)" }
-                        .joined(separator: " ")
-                    logger.debug(
-                        "discovery: resolved TXT for \(service.name, privacy: .public): \(payload, privacy: .public)")
-                }
                 return ResolvedGatewayService(txt: txt, host: host, port: port)
             },
             completion: { [weak self] resolved in
