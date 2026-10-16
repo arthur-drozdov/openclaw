@@ -5,6 +5,7 @@
   --indicator-color: var(--accent);
 
   display: flex;
+  flex-shrink: 0;
   align-items: stretch;
   overflow-x: auto;
   padding-block-end: 2px;
