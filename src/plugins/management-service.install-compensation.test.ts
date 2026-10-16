@@ -27,23 +27,23 @@ import { invokePluginArtifactInstallMock } from "./test-helpers/install-fixtures
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const mocks = vi.hoisted(() => ({ install: vi.fn(), commit: vi.fn() }));
 vi.mock("./clawhub.js", () => ({
-  installPluginFromClawHub: (...args: unknown[]) => mocks.install(...args),
+  installPluginFromClawHub: mocks.install,
 }));
 vi.mock("./git-install.js", () => ({
-  installPluginFromGitSpec: (...args: unknown[]) => mocks.install(...args),
+  installPluginFromGitSpec: mocks.install,
 }));
 vi.mock("./install.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./install.js")>()),
-  installPluginFromNpmSpec: (...args: unknown[]) => mocks.install(...args),
-  installPluginFromNpmPackArchive: (...args: unknown[]) => mocks.install(...args),
-  installPluginFromPath: (...args: unknown[]) => mocks.install(...args),
+  installPluginFromNpmSpec: mocks.install,
+  installPluginFromNpmPackArchive: mocks.install,
+  installPluginFromPath: mocks.install,
 }));
 vi.mock("./marketplace.js", () => ({
-  installPluginFromMarketplace: (...args: unknown[]) => mocks.install(...args),
+  installPluginFromMarketplace: mocks.install,
 }));
 vi.mock("./install-record-commit.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./install-record-commit.js")>()),
-  commitPluginInstallRecordsWithConfig: (...args: unknown[]) => mocks.commit(...args),
+  commitPluginInstallRecordsWithConfig: mocks.commit,
 }));
 vi.mock("./installed-plugin-index-records.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./installed-plugin-index-records.js")>()),
@@ -98,11 +98,21 @@ vi.mock("./status.js", () => ({
   buildPluginSnapshotReport: () => ({ plugins: [] }),
   buildPluginSnapshotReportAsync: async () => ({ plugins: [] }),
 }));
-const { installManagedPluginSource } = await import("./management-install.js");
+const { installManagedPluginSource: installSource } = await import("./management-install.js");
 const snapshot = { config: {}, baseHash: "base-hash", writeOptions: {} };
 const acceptCapabilities: PluginCapabilityConsentHandler = async (review) => ({
   reviewToken: review.reviewToken,
 });
+const installDefaults = { snapshot, onCapabilityConsent: acceptCapabilities };
+function mockReviewedArtifact(transaction?: Parameters<typeof attachPluginInstallTransaction>[1]) {
+  mocks.install.mockImplementation(
+    (params: Parameters<typeof invokePluginArtifactInstallMock>[1]) =>
+      invokePluginArtifactInstallMock(async () => {
+        const artifact = { ok: true, pluginId: "demo", targetDir: "/managed/demo" };
+        return transaction ? attachPluginInstallTransaction(artifact, transaction) : artifact;
+      }, params),
+  );
+}
 const settlements = [
   {
     failure: "authority-closed",
@@ -140,13 +150,13 @@ describe("managed plugin install transactions", () => {
 
   it("returns the committed bundled configuration to the management owner", async () => {
     const config = { plugins: { entries: { demo: { enabled: true } } } };
-    const installed = await installManagedPluginSource({
+    const installed = await installSource({
+      snapshot,
       request: {
         source: "bundled",
         rawSpec: "demo",
         bundledSource: { pluginId: "demo", localPath: "/bundled/demo" },
       },
-      snapshot,
     });
     expect(installed).toMatchObject({ ok: true, config });
   });
@@ -154,22 +164,16 @@ describe("managed plugin install transactions", () => {
   it("rechecks the initiating owner after awaited capability consent", async () => {
     const expired = new Error("approval owner expired during review");
     let current = true;
-    mocks.install.mockImplementation(
-      (params: Parameters<typeof invokePluginArtifactInstallMock>[1]) =>
-        invokePluginArtifactInstallMock(
-          async () => ({ ok: true, pluginId: "demo", targetDir: "/managed/demo" }),
-          params,
-        ),
-    );
+    mockReviewedArtifact();
     await expect(
-      installManagedPluginSource({
+      installSource({
+        snapshot,
         request: {
           source: "local",
           path: "/incoming.tgz",
           recordSource: "archive",
           mode: "update",
         },
-        snapshot,
         onCapabilityConsent: async (review) => {
           await Promise.resolve();
           current = false;
@@ -188,7 +192,6 @@ describe("managed plugin install transactions", () => {
   it.each(settlements)(
     "settles $request.source payloads after $failure",
     async ({ request, failure }) => {
-      mocks.commit.mockReset();
       const home = await fs.realpath(tempDirs.make("openclaw-managed-upgrade-"));
       const sourceDir = path.join(home, "incoming");
       const targetDir = path.join(home, "extensions", "demo");
@@ -218,19 +221,9 @@ describe("managed plugin install transactions", () => {
             )
           : new Error(failure);
       let active = true;
-      mocks.commit.mockImplementation(async ({ nextConfig }) => {
-        if (failure === "before-commit") {
-          throw conflict;
-        }
-        return {
-          configWrite: {
-            path: path.join(home, "openclaw.json"),
-            nextConfig,
-            persistedHash: "committed",
-            persistedSourceConfig: nextConfig,
-          },
-        };
-      });
+      if (failure === "before-commit") {
+        mocks.commit.mockRejectedValue(conflict);
+      }
       mocks.install.mockImplementation(
         async (params: {
           onBeforePluginArtifactCommit?: PluginInstallArtifactConsentHandler;
@@ -284,9 +277,9 @@ describe("managed plugin install transactions", () => {
         active = failure !== "authority-closed";
         return await acceptCapabilities(review);
       });
-      const installed = installManagedPluginSource({
+      const installed = installSource({
+        ...installDefaults,
         request,
-        snapshot,
         env: { HOME: home, OPENCLAW_STATE_DIR: path.join(home, "state") },
         ...(failure === "runtime-apply"
           ? {
@@ -311,17 +304,17 @@ describe("managed plugin install transactions", () => {
       } else if (failure === "runtime-apply") {
         const rejected = await installed.catch((error: unknown) => error);
         expect(rejected).toBeInstanceOf(PluginInstallPersistedError);
-        expect(rejected).toMatchObject({ pluginId: "demo", cause: conflict });
+        expect(rejected).toMatchObject({ pluginId: "demo" });
         if (rejected instanceof PluginInstallPersistedError) {
           expect(rejected.cause).toBe(conflict);
         }
         const projected = projectPluginRuntimeFailure(rejected);
-        expect(projected.persistence).toEqual({ operation: "install", pluginId: "demo" });
+        expect([projected.persistence, projected.runtime]).toEqual([
+          { operation: "install", pluginId: "demo" },
+          conflict instanceof PluginRuntimeApplicationError ? conflict.details : undefined,
+        ]);
         expect(projected.message).toContain(conflict.message);
         expect(projected.message).toContain("service startup failed");
-        expect(projected.runtime).toEqual(
-          conflict instanceof PluginRuntimeApplicationError ? conflict.details : undefined,
-        );
       } else {
         await expect(installed).rejects.toBe(conflict);
         expect(projectPluginRuntimeFailure(conflict)).not.toHaveProperty("persistence");
@@ -356,7 +349,8 @@ describe("managed plugin install transactions", () => {
     mocks.install.mockResolvedValue({ ok: true, pluginId: "demo", targetDir: sourcePath });
     mocks.commit.mockRejectedValue(conflict);
     await expect(
-      installManagedPluginSource({
+      installSource({
+        ...installDefaults,
         request: {
           source: "local",
           path: sourcePath,
@@ -364,8 +358,6 @@ describe("managed plugin install transactions", () => {
           mode: "install",
           link: true,
         },
-        snapshot,
-        onCapabilityConsent: acceptCapabilities,
       }),
     ).rejects.toBe(conflict);
     expect(mocks.install).toHaveBeenCalledWith(
@@ -381,26 +373,15 @@ describe("managed plugin install transactions", () => {
       const settlementError = new Error(`${settlement} failed`);
       const transaction = { commit: vi.fn(), rollback: vi.fn() };
       transaction[settlement].mockRejectedValue(settlementError);
-      mocks.install.mockImplementation(
-        (params: Parameters<typeof invokePluginArtifactInstallMock>[1]) =>
-          invokePluginArtifactInstallMock(
-            async () =>
-              attachPluginInstallTransaction(
-                { ok: true, pluginId: "demo", targetDir: "/managed/demo" },
-                transaction,
-              ),
-            params,
-          ),
-      );
+      mockReviewedArtifact(transaction);
       if (settlement === "rollback") {
         mocks.commit.mockRejectedValue(conflict);
       }
       const runtime = { log: vi.fn(), error: vi.fn(), exit: vi.fn() };
-      const installed = installManagedPluginSource({
+      const installed = installSource({
+        ...installDefaults,
         request: { source: "npm", spec: "demo@2.0.0", mode: "update" },
-        snapshot,
         runtime,
-        onCapabilityConsent: acceptCapabilities,
       });
       if (settlement === "rollback") {
         await expect(installed).rejects.toMatchObject({
