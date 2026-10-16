@@ -345,7 +345,7 @@ export abstract class ChatPaneLifecycle extends ChatPaneSessionObservation {
           applyChatCacheSnapshot(pageState, snapshot);
           const target = this.resolveChatReadTarget();
           if (target && snapshot.progressCard !== undefined) {
-            this.progressCard.hydrate(target, snapshot.progressCard);
+            this.progressCards.hydrate(target, snapshot.progressCard);
           }
         } else {
           this.hydrateStoredChatSnapshot(pageState, initialSessionKey);
@@ -508,7 +508,12 @@ export abstract class ChatPaneLifecycle extends ChatPaneSessionObservation {
     chatState.addCleanup(
       subscribeChatPaneSnapshotInvalidation(
         () => this.state,
-        () => this.progressCard.invalidate(this.resolveChatReadTarget()),
+        () => {
+          const target = this.resolveChatReadTarget();
+          if (target) {
+            this.progressCards.invalidate(target);
+          }
+        },
       ),
     );
     this.applyGatewaySnapshot(this.context.gateway.snapshot);

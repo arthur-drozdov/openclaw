@@ -7,6 +7,8 @@ import {
   Show,
   untrack,
 } from "solid-js";
+import { projectProgressCard } from "../../lib/reactive/domain-keyed.ts";
+import { projectOwner } from "../../lib/reactive/projection.ts";
 import { ChatComposerCapabilityDialogs } from "./chat-composer-capability-host.tsx";
 import { PaneLayout } from "./chat-pane-layout-view.tsx";
 import type { ChatPaneRuntime } from "./chat-pane-render.ts";
@@ -21,23 +23,53 @@ function MountedChatPaneRuntime(props: { runtime: ChatPaneRuntime }) {
   const runtime = untrack(() => props.runtime);
   runtime.mountPanelActions();
   runtime.mountToolIcons();
-  const [presented, setPresented] = createSignal(runtime.presented);
-  const [visible, setVisible] = createSignal(document.visibilityState !== "hidden");
+  const owner = projectOwner(runtime, (value) => value);
+  const progressScope = createMemo(
+    () => {
+      owner.revision();
+      return runtime.readProgressCardScope();
+    },
+    {
+      equals: (a, b) =>
+        a.store === b.store &&
+        a.client === b.client &&
+        a.hello === b.hello &&
+        a.target?.sessionKey === b.target?.sessionKey &&
+        a.target?.agentId === b.target?.agentId,
+    },
+  );
+  // The initial binding is replaced by the scope effect before subsequent reads.
+  let progressBinding = untrack(progressScope);
+  const progress = projectProgressCard(progressBinding);
+  const cacheProgress = () => {
+    const { target, store, options } = progressBinding;
+    if (target && options.admitAutomaticRead()) {
+      runtime.cacheProgressCard(target, store.get(target));
+    }
+  };
+  // Bind the imperative store watch to the current connection and conversation.
+  createEffect(progressScope, (next) => {
+    progressBinding = next;
+    progress.replaceSource(next);
+  });
+  onSettled(() => {
+    // Parking may stop rendering, but reset/delete events must still retire card lifetimes.
+    const stop = progress.subscribe(cacheProgress);
+    cacheProgress();
+    return stop;
+  });
   const visibilityChanged = () => runtime.requestUpdate();
   document.addEventListener("visibilitychange", visibilityChanged);
   const lifecycle = createSolidRenderLifecycle({
     host: runtime.element,
-    presented: () => presented() && visible(),
+    presented: () => owner.read().presented && document.visibilityState !== "hidden",
     read: () => {
+      progress.read();
       runtime.prepareRender();
       return runtime.render(() => providerReview);
     },
   });
-  const unsubscribe = runtime.subscribe(() => {
-    setVisible(document.visibilityState !== "hidden");
-    setPresented(runtime.presented);
-    lifecycle.invalidate();
-  });
+  const unsubscribe = owner.subscribe(() => lifecycle.invalidate());
   const frame = createMemo(() => lifecycle.snapshot());
   const providerReview: ChatProviderReviewOwner = createChatProviderReview({
     source: () => frame().providerReviewSource,
