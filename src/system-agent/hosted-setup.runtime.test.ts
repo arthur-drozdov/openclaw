@@ -43,6 +43,53 @@ import {
 } from "./chat-engine.test-support.js";
 import { ChatWizardHost } from "./chat-wizard-host.js";
 
+function createEngine(options: ConstructorParameters<typeof SystemAgentChatEngine>[0] = {}) {
+  return new SystemAgentChatEngine({
+    runAgentTurn: async () => null,
+    ...options,
+    deps: { loadOverview: fakeOverviewLoader(), ...options.deps },
+  });
+}
+
+function useConfigWriter() {
+  mocks.writeWizardConfigFile.mockImplementation(async (config: OpenClawConfig) =>
+    hostedConfigFiles.write(config),
+  );
+}
+
+function setupSnapshot(config: OpenClawConfig, hash: string) {
+  return { exists: true, valid: true, hash, config, sourceConfig: config };
+}
+
+function useSetupConfig(config: OpenClawConfig, hash: string) {
+  mocks.readSetupConfigFileSnapshot.mockResolvedValue(setupSnapshot(config, hash));
+}
+
+function useGatewayConfig() {
+  const config: OpenClawConfig = {
+    ...structuredClone(sharedVerifiedInferenceConfig),
+    gateway: { mode: "local" },
+  };
+  vi.stubEnv("OPENCLAW_GATEWAY_TOKEN", "");
+  vi.stubEnv("OPENCLAW_GATEWAY_PASSWORD", "");
+  useSetupConfig(config, "gateway-base-hash");
+  useConfigWriter();
+  return config;
+}
+
+async function replyWithToken(engine: SystemAgentChatEngine) {
+  expect((await engine.handle("connect telegram")).text).toContain("Bot token");
+  return engine.handle("123:abc");
+}
+
+function channelConfig(): OpenClawConfig {
+  return {
+    agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+    auth: { profiles: { "openai:main": { provider: "openai", mode: "api_key" } } },
+    models: structuredClone(sharedVerifiedInferenceConfig.models),
+  };
+}
+
 describe("SystemAgentChatEngine runtime", () => {
   it.each(["disposed", "completed"] as const)(
     "retires retained channel write authority after hosted setup is %s",
@@ -50,15 +97,10 @@ describe("SystemAgentChatEngine runtime", () => {
       let retainedOptions: SetupChannelsOptions | undefined;
       const prepare = vi.fn(async () => {});
       mocks.readSetupConfigFileSnapshot.mockResolvedValue({
-        exists: true,
-        valid: true,
-        hash: "channel-lifetime-hash",
-        config: {},
+        ...setupSnapshot({}, "channel-lifetime-hash"),
         sourceConfig: {},
       });
-      mocks.writeWizardConfigFile.mockImplementation(async (config: OpenClawConfig) =>
-        hostedConfigFiles.write(config),
-      );
+      useConfigWriter();
       mocks.setupChannels.mockImplementation(
         async (
           config: OpenClawConfig,
@@ -102,9 +144,7 @@ describe("SystemAgentChatEngine runtime", () => {
   it("hosts a channel setup wizard as chat turns", async () => {
     useTempStateDir();
     const wizardRuns: string[] = [];
-    const engine = new SystemAgentChatEngine({
-      runAgentTurn: async () => null,
-      deps: { loadOverview: fakeOverviewLoader() },
+    const engine = createEngine({
       runChannelSetupWizard: async (channel: string, prompter: WizardPrompter) => {
         wizardRuns.push(channel);
         const token = await prompter.text({ message: "Bot token" });
@@ -123,13 +163,10 @@ describe("SystemAgentChatEngine runtime", () => {
     // Starting the wizard is not a write: it begins immediately, no approval step.
     const tokenStep = await engine.handle("connect telegram");
     expect(tokenStep.text).toContain("Bot token");
-    // Text steps stay prose-only; only closed choices become typed questions.
     expect(tokenStep.question).toBeUndefined();
 
     const modeStep = await engine.handle("123:abc");
     expect(modeStep.text).toContain("1. Pairing");
-    // The awaited select step is mirrored for card-capable clients; labels are
-    // the replies parseWizardAnswer accepts.
     expect(modeStep.question).toEqual({
       id: expect.any(String),
       header: "Choose one",
@@ -149,13 +186,7 @@ describe("SystemAgentChatEngine runtime", () => {
     };
     const beforeEffects: Array<() => Promise<void>> = [];
     const appendAuditEntry = vi.fn(async () => "state/openclaw.sqlite");
-    mocks.readSetupConfigFileSnapshot.mockResolvedValue({
-      exists: true,
-      valid: true,
-      hash: "skills-base-hash",
-      config: baseConfig,
-      sourceConfig: baseConfig,
-    });
+    useSetupConfig(baseConfig, "skills-base-hash");
     mocks.setupSkills.mockImplementation(
       async (
         config: OpenClawConfig,
@@ -172,15 +203,8 @@ describe("SystemAgentChatEngine runtime", () => {
         return { ...config, skills: { install: { nodeManager: "npm" } } };
       },
     );
-    mocks.writeWizardConfigFile.mockImplementation(async (config: OpenClawConfig) =>
-      hostedConfigFiles.write(config),
-    );
-    const engine = new SystemAgentChatEngine({
-      surface: "gateway",
-      runAgentTurn: async () => null,
-      appendAuditEntry,
-      deps: { loadOverview: fakeOverviewLoader() },
-    });
+    useConfigWriter();
+    const engine = createEngine({ surface: "gateway", appendAuditEntry });
 
     const reply = await engine.handle("configure skills");
 
@@ -188,10 +212,7 @@ describe("SystemAgentChatEngine runtime", () => {
     expect(beforeEffects).toHaveLength(1);
     expect(mocks.writeWizardConfigFile).toHaveBeenCalledWith(
       expect.objectContaining({ skills: { install: { nodeManager: "npm" } } }),
-      {
-        allowConfigSizeDrop: false,
-        baseHash: "skills-base-hash",
-      },
+      { allowConfigSizeDrop: false, baseHash: "skills-base-hash" },
     );
     expect(appendAuditEntry).toHaveBeenCalledWith(
       expect.objectContaining({ operation: "skills.setup" }),
@@ -202,13 +223,7 @@ describe("SystemAgentChatEngine runtime", () => {
     const baseConfig: OpenClawConfig = {};
     const appendAuditEntry = vi.fn(async () => "state/openclaw.sqlite");
     const beforePersistentEffects: Array<() => Promise<void>> = [];
-    mocks.readSetupConfigFileSnapshot.mockResolvedValue({
-      exists: true,
-      valid: true,
-      hash: "search-base-hash",
-      config: baseConfig,
-      sourceConfig: baseConfig,
-    });
+    useSetupConfig(baseConfig, "search-base-hash");
     mocks.runSearchSetupFlow.mockImplementation(
       async (
         config: OpenClawConfig,
@@ -241,15 +256,8 @@ describe("SystemAgentChatEngine runtime", () => {
         };
       },
     );
-    mocks.writeWizardConfigFile.mockImplementation(async (config: OpenClawConfig) =>
-      hostedConfigFiles.write(config),
-    );
-    const engine = new SystemAgentChatEngine({
-      surface: "gateway",
-      runAgentTurn: async () => null,
-      appendAuditEntry,
-      deps: { loadOverview: fakeOverviewLoader() },
-    });
+    useConfigWriter();
+    const engine = createEngine({ surface: "gateway", appendAuditEntry });
 
     const providerStep = await engine.handle("configure search");
     expect(providerStep.question).toEqual({
@@ -275,29 +283,9 @@ describe("SystemAgentChatEngine runtime", () => {
   });
 
   it("hosts full Gateway setup with a lockout warning, audited config write, and no restart", async () => {
-    const baseConfig: OpenClawConfig = {
-      ...structuredClone(sharedVerifiedInferenceConfig),
-      gateway: { mode: "local" },
-    };
+    useGatewayConfig();
     const appendAuditEntry = vi.fn(async () => "state/openclaw.sqlite");
-    vi.stubEnv("OPENCLAW_GATEWAY_TOKEN", "");
-    vi.stubEnv("OPENCLAW_GATEWAY_PASSWORD", "");
-    mocks.readSetupConfigFileSnapshot.mockResolvedValue({
-      exists: true,
-      valid: true,
-      hash: "gateway-base-hash",
-      config: baseConfig,
-      sourceConfig: baseConfig,
-    });
-    mocks.writeWizardConfigFile.mockImplementation(async (config: OpenClawConfig) =>
-      hostedConfigFiles.write(config),
-    );
-    const engine = new SystemAgentChatEngine({
-      surface: "gateway",
-      runAgentTurn: async () => null,
-      appendAuditEntry,
-      deps: { loadOverview: fakeOverviewLoader() },
-    });
+    const engine = createEngine({ surface: "gateway", appendAuditEntry });
 
     const { portStep, storageStep } = await advanceGatewayWizardToSecretStorage(engine);
     expect(portStep.text).toContain(
@@ -351,23 +339,8 @@ describe("SystemAgentChatEngine runtime", () => {
 
   it("rechecks inference authority immediately before a hosted Gateway write", async () => {
     useTempStateDir();
-    const baseConfig: OpenClawConfig = {
-      ...structuredClone(sharedVerifiedInferenceConfig),
-      gateway: { mode: "local" },
-    };
+    const baseConfig = useGatewayConfig();
     const currentConfig = structuredClone(baseConfig);
-    vi.stubEnv("OPENCLAW_GATEWAY_TOKEN", "");
-    vi.stubEnv("OPENCLAW_GATEWAY_PASSWORD", "");
-    mocks.readSetupConfigFileSnapshot.mockResolvedValue({
-      exists: true,
-      valid: true,
-      hash: "gateway-base-hash",
-      config: baseConfig,
-      sourceConfig: baseConfig,
-    });
-    mocks.writeWizardConfigFile.mockImplementation(async (config: OpenClawConfig) =>
-      hostedConfigFiles.write(config),
-    );
     const changedConfig: OpenClawConfig = {
       agents: { defaults: { model: "anthropic/claude-opus-4-8" } },
       models: {
@@ -385,12 +358,10 @@ describe("SystemAgentChatEngine runtime", () => {
     // The route flips between the final turn's entry gate and the
     // persistent-apply recheck; only the apply boundary can catch it.
     let baseReadsRemaining = Number.POSITIVE_INFINITY;
-    const engine = new SystemAgentChatEngine({
+    const engine = createEngine({
       surface: "gateway",
       verifiedInference,
-      runAgentTurn: async () => null,
       deps: {
-        loadOverview: fakeOverviewLoader(),
         readConfigFileSnapshot: vi.fn(async () => {
           const config = baseReadsRemaining > 0 ? currentConfig : changedConfig;
           baseReadsRemaining -= 1;
@@ -411,18 +382,8 @@ describe("SystemAgentChatEngine runtime", () => {
 
   it("keeps remote Gateway mode guidance-only", async () => {
     const baseConfig: OpenClawConfig = { gateway: { mode: "remote" } };
-    mocks.readSetupConfigFileSnapshot.mockResolvedValue({
-      exists: true,
-      valid: true,
-      hash: "remote-gateway-hash",
-      config: baseConfig,
-      sourceConfig: baseConfig,
-    });
-    const engine = new SystemAgentChatEngine({
-      surface: "gateway",
-      runAgentTurn: async () => null,
-      deps: { loadOverview: fakeOverviewLoader() },
-    });
+    useSetupConfig(baseConfig, "remote-gateway-hash");
+    const engine = createEngine({ surface: "gateway" });
 
     const reply = await engine.handle("configure gateway");
 
@@ -434,10 +395,8 @@ describe("SystemAgentChatEngine runtime", () => {
   });
 
   it("hands CLI Gateway credentials to the masked terminal wizard", async () => {
-    const engine = new SystemAgentChatEngine({
+    const engine = createEngine({
       surface: "cli",
-      runAgentTurn: async () => null,
-      deps: { loadOverview: fakeOverviewLoader() },
       runGatewaySetupWizard: async (prompter) => {
         await prompter.text({ message: "Gateway token", sensitive: true });
       },
@@ -457,25 +416,14 @@ describe("SystemAgentChatEngine runtime", () => {
   it("reports a failed hosted search-provider install without writing or auditing", async () => {
     const baseConfig: OpenClawConfig = {};
     const appendAuditEntry = vi.fn(async () => "state/openclaw.sqlite");
-    mocks.readSetupConfigFileSnapshot.mockResolvedValue({
-      exists: true,
-      valid: true,
-      hash: "search-base-hash",
-      config: baseConfig,
-      sourceConfig: baseConfig,
-    });
+    useSetupConfig(baseConfig, "search-base-hash");
     mocks.runSearchSetupFlow.mockResolvedValue({
       outcome: "install-failed",
       config: baseConfig,
       providerId: "brave",
       reason: "failed",
     });
-    const engine = new SystemAgentChatEngine({
-      surface: "gateway",
-      runAgentTurn: async () => null,
-      appendAuditEntry,
-      deps: { loadOverview: fakeOverviewLoader() },
-    });
+    const engine = createEngine({ surface: "gateway", appendAuditEntry });
 
     const reply = await engine.handle("configure search");
 
@@ -488,10 +436,8 @@ describe("SystemAgentChatEngine runtime", () => {
   });
 
   it("hands CLI search credentials to the masked terminal wizard", async () => {
-    const engine = new SystemAgentChatEngine({
+    const engine = createEngine({
       surface: "cli",
-      runAgentTurn: async () => null,
-      deps: { loadOverview: fakeOverviewLoader() },
       runSearchSetupWizard: async (prompter) => {
         await prompter.text({ message: "Provider API key", sensitive: true });
       },
@@ -517,10 +463,7 @@ describe("SystemAgentChatEngine runtime", () => {
       sourceConfig: {},
       issues: [{ path: "gateway.port", message: "Expected number" }],
     });
-    const engine = new SystemAgentChatEngine({
-      runAgentTurn: async () => null,
-      deps: { loadOverview: fakeOverviewLoader() },
-    });
+    const engine = createEngine();
 
     const reply = await engine.handle("connect telegram");
 
@@ -534,9 +477,7 @@ describe("SystemAgentChatEngine runtime", () => {
     const appendAuditEntry = vi.fn(async () => {
       throw new Error("audit store is read-only");
     });
-    const engine = new SystemAgentChatEngine({
-      runAgentTurn: async () => null,
-      deps: { loadOverview: fakeOverviewLoader() },
+    const engine = createEngine({
       runChannelSetupWizard: async () => {},
       appendAuditEntry,
     });
@@ -589,11 +530,7 @@ describe("SystemAgentChatEngine runtime", () => {
         return hostedConfigFiles.write(nextConfig);
       },
     );
-    const engine = new SystemAgentChatEngine({
-      surface: "gateway",
-      runAgentTurn: async () => null,
-      deps: { loadOverview: fakeOverviewLoader() },
-    });
+    const engine = createEngine({ surface: "gateway" });
 
     const tokenStep = await engine.handle("connect telegram");
     expect(tokenStep.text).toContain("Bot token");
@@ -624,32 +561,16 @@ describe("SystemAgentChatEngine runtime", () => {
 
   it("rechecks inference authority immediately before a hosted channel write", async () => {
     useTempStateDir();
-    const baseConfig: OpenClawConfig = {
-      agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
-      auth: { profiles: { "openai:main": { provider: "openai", mode: "api_key" } } },
-      models: {
-        providers: {
-          openai: {
-            baseUrl: "https://api.openai.com/v1",
-            apiKey: "test-key",
-            auth: "api-key",
-            models: [],
-          },
-        },
-      },
-    };
+    const baseConfig = channelConfig();
     const changedConfig: OpenClawConfig = {
       agents: { defaults: { model: { primary: "anthropic/claude-opus-4-8" } } },
     };
     const verifiedInference = await createAmbientVerifiedBinding(baseConfig);
     let currentConfig = structuredClone(baseConfig);
     mocks.readSetupConfigFileSnapshot.mockResolvedValue({
-      exists: true,
-      valid: true,
-      path: "/tmp/openclaw.json",
-      hash: "base-hash",
-      config: structuredClone(baseConfig),
+      ...setupSnapshot(structuredClone(baseConfig), "base-hash"),
       sourceConfig: structuredClone(baseConfig),
+      path: "/tmp/openclaw.json",
       issues: [],
     });
     mocks.setupChannels.mockImplementation(
@@ -662,22 +583,16 @@ describe("SystemAgentChatEngine runtime", () => {
         };
       },
     );
-    mocks.writeWizardConfigFile.mockImplementation(async (config: OpenClawConfig) =>
-      hostedConfigFiles.write(config),
-    );
-    const engine = new SystemAgentChatEngine({
+    useConfigWriter();
+    const engine = createEngine({
       surface: "gateway",
       verifiedInference,
-      runAgentTurn: async () => null,
       deps: {
-        loadOverview: fakeOverviewLoader(),
         readConfigFileSnapshot: vi.fn(async () => configSnapshot(currentConfig)) as never,
       },
     });
 
-    const tokenStep = await engine.handle("connect telegram");
-    expect(tokenStep.text).toContain("Bot token");
-    const stopped = await engine.handle("123:abc");
+    const stopped = await replyWithToken(engine);
 
     expect(stopped.text).toContain("Telegram setup stopped");
     expect(mocks.writeWizardConfigFile).not.toHaveBeenCalled();
@@ -685,20 +600,7 @@ describe("SystemAgentChatEngine runtime", () => {
 
   it("rechecks inference authority before hosted channel post-write hooks", async () => {
     useTempStateDir();
-    const baseConfig: OpenClawConfig = {
-      agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
-      auth: { profiles: { "openai:main": { provider: "openai", mode: "api_key" } } },
-      models: {
-        providers: {
-          openai: {
-            baseUrl: "https://api.openai.com/v1",
-            apiKey: "test-key",
-            auth: "api-key",
-            models: [],
-          },
-        },
-      },
-    };
+    const baseConfig = channelConfig();
     const changedConfig: OpenClawConfig = {
       agents: { defaults: { model: { primary: "anthropic/claude-opus-4-8" } } },
     };
@@ -706,12 +608,9 @@ describe("SystemAgentChatEngine runtime", () => {
     let currentConfig = structuredClone(baseConfig);
     const hook = { channel: "telegram", accountId: "default", run: vi.fn() };
     mocks.readSetupConfigFileSnapshot.mockResolvedValue({
-      exists: true,
-      valid: true,
-      path: "/tmp/openclaw.json",
-      hash: "base-hash",
-      config: structuredClone(baseConfig),
+      ...setupSnapshot(structuredClone(baseConfig), "base-hash"),
       sourceConfig: structuredClone(baseConfig),
+      path: "/tmp/openclaw.json",
       issues: [],
     });
     mocks.setupChannels.mockImplementation(
@@ -733,19 +632,15 @@ describe("SystemAgentChatEngine runtime", () => {
       currentConfig = structuredClone(changedConfig);
       return hostedConfigFiles.write(config);
     });
-    const engine = new SystemAgentChatEngine({
+    const engine = createEngine({
       surface: "gateway",
       verifiedInference,
-      runAgentTurn: async () => null,
       deps: {
-        loadOverview: fakeOverviewLoader(),
         readConfigFileSnapshot: vi.fn(async () => configSnapshot(currentConfig)) as never,
       },
     });
 
-    const tokenStep = await engine.handle("connect telegram");
-    expect(tokenStep.text).toContain("Bot token");
-    const stopped = await engine.handle("123:abc");
+    const stopped = await replyWithToken(engine);
 
     expect(stopped.text).toContain("Telegram setup stopped");
     expect(mocks.writeWizardConfigFile).toHaveBeenCalledOnce();
@@ -824,13 +719,7 @@ describe("hosted channel post-write hooks", () => {
         metadata: getCurrentPluginMetadataSnapshot(),
         registry: getPluginRuntimeGenerationRegistry(),
       });
-      return {
-        exists: true,
-        valid: true,
-        hash: "setup-base-hash",
-        config: baseConfig,
-        sourceConfig: baseConfig,
-      };
+      return setupSnapshot(baseConfig, "setup-base-hash");
     });
     mocks.setupChannels.mockImplementation(
       async (
