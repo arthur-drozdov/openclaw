@@ -198,9 +198,13 @@ async function autoSetup(assertAuthority: () => void): Promise<SystemAgentSetupA
     if (candidate.kind === "codex-cli" && activation.status === "auth") {
       codexNeedsSignIn = true;
     }
-    if (candidate.kind === "codex-cli" && activation.status !== "auth") {
-      // An installed Codex runtime that cannot be inspected or started is not absent.
-      // Keep its diagnostic visible instead of silently selecting another provider.
+    if (
+      candidate.kind === "codex-cli" &&
+      (activation.status === "unavailable" ||
+        activation.error.includes("Cannot inspect Codex processes."))
+    ) {
+      // Terminal runs carry inspection failures as text. Model rejections still
+      // follow the ordinary candidate ladder; runtime inspection must stay visible.
       codexFailed = true;
     }
     attempts.push({ kind: candidate.kind, label: candidate.label, error: activation.error });

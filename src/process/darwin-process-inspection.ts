@@ -190,7 +190,8 @@ export function* readDarwinProcessCensus(timeoutMs: number): Generator<DarwinCen
     }
     return;
   }
-  const result = spawnSync("/bin/ps", argsFor(), {
+  // Group cleanup needs topology only; preserve Node's existing ps projection.
+  const result = spawnSync("/bin/ps", ["-A", "-o", "pid=,pgid=,stat=,ppid=,uid="], {
     encoding: "utf8",
     timeout: remaining(deadline),
     maxBuffer,
@@ -200,17 +201,34 @@ export function* readDarwinProcessCensus(timeoutMs: number): Generator<DarwinCen
   if (result.error || result.status !== 0) {
     throw failure(result.error);
   }
-  for (const row of parse(result.stdout)) {
+  for (const line of result.stdout.split("\n")) {
     remaining(deadline);
-    if (row.pid !== result.pid) {
-      yield row;
+    if (!line.trim()) {
+      continue;
+    }
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+(-?\d+)\s*$/.exec(line);
+    if (
+      !match ||
+      ![match[1], match[2], match[4]].every((value) => Number.isSafeInteger(Number(value)))
+    ) {
+      throw new DarwinProcessInspectionError("unavailable");
+    }
+    const pid = Number(match[1]);
+    if (pid !== result.pid) {
+      yield {
+        pid,
+        pgid: Number(match[2]),
+        state: match[3]!,
+        ppid: Number(match[4]),
+        uid: Number(match[5]) >>> 0,
+      };
     }
   }
   remaining(deadline);
 }
 
 /** Arguments only: never request or return process environment values. */
-export async function readDarwinProcessCommand(pid: number, deadline: number): Promise<string> {
+export async function readDarwinProcessCommandLine(pid: number, deadline: number): Promise<string> {
   remaining(deadline);
   if (!process.versions.bun) {
     return (await ps(["-o", "command=", "-p", String(pid)], deadline)).split("\n")[0]?.trim() ?? "";

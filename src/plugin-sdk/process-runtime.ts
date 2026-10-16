@@ -51,6 +51,6 @@ export {
   DarwinProcessInspectionError,
   readDarwinProcessSnapshot,
   readDarwinProcessTree,
-  readDarwinProcessCommand,
+  readDarwinProcessCommandLine,
   type DarwinProcess,
 } from "../process/darwin-process-inspection.js";

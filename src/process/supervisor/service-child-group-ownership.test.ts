@@ -149,7 +149,7 @@ it.each([
       ...result,
       stdout: result.stdout
         .split("\n")
-        .map((row) => row.replace(/^(\d+) (\d+) (\S+)$/, "$1 1 $2 $3 501 Sat Aug 29 10:00:00 2026"))
+        .map((row) => row.replace(/^(\d+) (\d+) (\S+)$/, "$1 $2 $3 1 501"))
         .join("\n"),
     });
     expect(hasLiveOwnedProcessGroupMembers()).toBe(expected);
@@ -174,7 +174,7 @@ it("joins Darwin numeric ancestry to exact native command facts", () => {
   census.mockReturnValue({
     pid: owner + 3,
     status: 0,
-    stdout: `${owner} 1 ${owner} S 501 Sat Aug 29 10:00:00 2026\n1 0 1 S 0 Sat Aug 29 10:00:00 2026\n2 0 2 S -2 Sat Aug 29 10:00:00 2026\n${owner + 1} 1 ${owner} S 501 Sat Aug 29 10:00:00 2026\n${owner + 3} ${owner} ${owner} R 501 Sat Aug 29 10:00:00 2026\n`,
+    stdout: `${owner} ${owner} S 1 501\n1 1 S 0 0\n2 2 S 0 -2\n${owner + 1} ${owner} S 1 501\n${owner + 3} ${owner} R ${owner} 501\n`,
   });
   darwinCommand.mockImplementation((pid: number, uid: number) =>
     pid === owner
@@ -230,7 +230,7 @@ it("does not turn native Darwin inspection failures into an empty census", () =>
   mockProcessPlatform("darwin");
   census.mockReturnValue({
     status: 0,
-    stdout: `${owner} 1 ${owner} S 501 Sat Aug 29 10:00:00 2026\n`,
+    stdout: `${owner} ${owner} S 1 501\n`,
   });
   darwinCommand.mockImplementation(() => {
     throw new Error("native process inspection unavailable");
@@ -271,7 +271,7 @@ it("does not request Node Darwin arguments for kernel tasks or zombie states wit
   mockProcessPlatform("darwin");
   census.mockReturnValue({
     status: 0,
-    stdout: `0 0 0 R 0 Sat Aug 29 10:00:00 2026\n${owner} 1 ${owner} Z+ 501 Sat Aug 29 10:00:00 2026\n`,
+    stdout: `0 0 R 0 0\n${owner} ${owner} Z+ 1 501\n`,
   });
   expect([...readProcessGroupMembers(1000, { readDarwinCommand: darwinCommand })]).toEqual([
     { pid: 0, pgid: 0, state: "R", command: { ppid: 0, argv: [], uid: 0 } },

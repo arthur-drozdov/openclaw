@@ -151,7 +151,7 @@ describe("Gateway automatic inference setup", () => {
     expect(fixture.commit).not.toHaveBeenCalled();
   });
 
-  it.each(["result", "throw"])(
+  it.each(["unavailable", "unknown", "timeout", "throw"] as const)(
     "shows Codex inspection failure without activating Ollama: %s",
     async (failureMode) => {
       fixture.detect.mockResolvedValueOnce(detection([ollama, codex]));
@@ -159,7 +159,7 @@ describe("Gateway automatic inference setup", () => {
       if (failureMode === "throw") {
         fixture.activate.mockRejectedValueOnce(new Error(error));
       } else {
-        fixture.activate.mockResolvedValueOnce({ ok: false, status: "unavailable", error });
+        fixture.activate.mockResolvedValueOnce({ ok: false, status: failureMode, error });
       }
 
       expect(await runGatewayAutomaticSetup(context(), () => {})).toMatchObject({
@@ -171,6 +171,24 @@ describe("Gateway automatic inference setup", () => {
       expect(fixture.activate).toHaveBeenCalledWith(expect.objectContaining({ kind: "codex-cli" }));
       expect(fixture.prepare).not.toHaveBeenCalled();
       expect(fixture.commit).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["rate_limit", "billing", "format", "timeout", "unknown"] as const)(
+    "can select Ollama after an ordinary Codex model failure: %s",
+    async (status) => {
+      fixture.detect.mockResolvedValueOnce(detection([ollama, codex]));
+      fixture.activate
+        .mockResolvedValueOnce({ ok: false, status, error: "Model request failed." })
+        .mockResolvedValueOnce({ ok: true, modelRef: ollama.modelRef, latencyMs: 1, lines: [] });
+
+      expect(await runGatewayAutomaticSetup(context(), () => {})).toMatchObject({
+        status: "activated",
+        selected: { kind: ollama.kind, modelRef: ollama.modelRef },
+        attempts: [{ kind: "codex-cli", error: "Model request failed." }],
+      });
+      expect(fixture.activate).toHaveBeenCalledTimes(2);
+      expect(fixture.prepare).not.toHaveBeenCalled();
     },
   );
 

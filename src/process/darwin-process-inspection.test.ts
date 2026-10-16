@@ -15,7 +15,7 @@ vi.mock("node:child_process", async (importOriginal) => ({
 import {
   readDarwinProcessSnapshot,
   readDarwinProcessTree,
-  readDarwinProcessCommand,
+  readDarwinProcessCommandLine,
 } from "./darwin-process-inspection.js";
 
 const bunDescriptor = Object.getOwnPropertyDescriptor(process.versions, "bun");
@@ -37,7 +37,7 @@ it("uses native identity and arguments without spawning ps under Bun", async () 
   native.command.mockReturnValue({ argv: ["/opt/codex", "app-server"] });
   expect(await readDarwinProcessSnapshot(performance.now() + 1000, [123])).toEqual([row]);
   expect(native.census).toHaveBeenCalledWith(expect.any(Number), [123], true);
-  expect(await readDarwinProcessCommand(123, performance.now() + 1000)).toBe(
+  expect(await readDarwinProcessCommandLine(123, performance.now() + 1000)).toBe(
     "/opt/codex app-server",
   );
   expect(native.command).toHaveBeenCalledExactlyOnceWith(123);
@@ -53,7 +53,7 @@ it.each(["census", "command"] as const)(
     await expect(
       kind === "census"
         ? readDarwinProcessSnapshot(performance.now() + 1000)
-        : readDarwinProcessCommand(123, performance.now() + 1000),
+        : readDarwinProcessCommandLine(123, performance.now() + 1000),
     ).rejects.toMatchObject({ reason: "permission" });
     expect(execFile).not.toHaveBeenCalled();
   },

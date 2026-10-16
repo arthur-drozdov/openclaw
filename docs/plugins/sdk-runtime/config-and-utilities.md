@@ -437,7 +437,7 @@ and the observer. An inaccessible relevant process still fails inspection. Start
 normalized UTC `ps lstart` format across Node and Bun so retained registrations
 remain comparable after runtime switches. They have second granularity; use a
 command fingerprint when authorizing cleanup of a retained PID.
-`readDarwinProcessCommand(pid, deadline)` returns joined arguments and never reads
+`readDarwinProcessCommandLine(pid, deadline)` returns joined arguments and never reads
 process environment values. Deadlines use `performance.now()` milliseconds.
 
 Bun uses in-process libproc for identities and the pinned proc-safe native argument

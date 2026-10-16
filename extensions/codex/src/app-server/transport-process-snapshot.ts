@@ -5,7 +5,7 @@ import {
   DarwinProcessInspectionError,
   readDarwinProcessSnapshot,
   readDarwinProcessTree,
-  readDarwinProcessCommand,
+  readDarwinProcessCommandLine,
 } from "openclaw/plugin-sdk/process-runtime";
 
 export type PosixProcess = {
@@ -185,7 +185,7 @@ export async function readCodexAppServerProcessCommand(
       }
     } while (pending);
   } else if (process.platform === "darwin") {
-    output = await readDarwinProcessCommand(observed.pid, deadline).catch((error: unknown) => {
+    output = await readDarwinProcessCommandLine(observed.pid, deadline).catch((error: unknown) => {
       throw inspectionFailure(error);
     });
   } else {
