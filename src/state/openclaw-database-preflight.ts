@@ -120,14 +120,14 @@ export async function assertOpenClawDatabasesReady(
         ? { configuredAgentDatabaseTargets: options.configuredAgentDatabaseTargets }
         : {}),
     },
-    options.operation === "doctor" ? "maintenance" : "runtime",
+    "runtime",
   );
   const failures: unknown[] = [];
   for (const refusal of schemas.agentRefusals ?? []) {
     if (
       !options.config ||
       ((refusal.code === "agent-database-ownership-mismatch" ||
-        (options.operation === "gateway-startup" &&
+        ((options.operation === "gateway-startup" || options.operation === "doctor") &&
           refusal.code !== "agent-database-inspection-pending")) &&
         !canIsolateAgentDatabase(options.config, refusal.agentId))
     ) {
