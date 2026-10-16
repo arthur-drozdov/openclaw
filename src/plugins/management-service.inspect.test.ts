@@ -6,6 +6,7 @@ import {
 import { resetConfigRuntimeState, setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import type { McpServerConfig } from "../config/types.mcp.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { PluginEntryConfig } from "../config/types.plugins.js";
 import type { ClawHubPluginDetail } from "../infra/clawhub-plugin-catalog.js";
 import * as bundleMcp from "./bundle-mcp.js";
 import { computeDeclaredSurfaceHash } from "./capability-summary.js";
@@ -50,18 +51,16 @@ const { inspectManagedPlugin } = await import("./management-service.js");
 type InspectOptions = Parameters<typeof inspectManagedPlugin>[0];
 const inspect = (options: Partial<InspectOptions> = {}) =>
   inspectManagedPlugin({ config: {}, env: {}, pluginId: "workboard", ...options });
-const oauthServer: McpServerConfig = {
-  url: "https://example.test/mcp",
-  auth: "oauth",
-};
+const oauthServer: McpServerConfig = { url: "https://example.test/mcp", auth: "oauth" };
+const configFor = (entry: PluginEntryConfig, id = "workboard"): OpenClawConfig => ({
+  plugins: { entries: { [id]: entry } },
+});
 const enabledConfig = (servers?: Record<string, McpServerConfig>): OpenClawConfig => ({
-  plugins: { entries: { workboard: { enabled: true } } },
+  ...configFor({ enabled: true }),
   ...(servers ? { mcp: { servers } } : {}),
 });
 const authStatus = (state: string) => [{ serverName: "docs", state }];
-const communityConfig: OpenClawConfig = {
-  plugins: { entries: { "community-plugin": { hooks: { allowConversationAccess: true } } } },
-};
+const communityConfig = configFor({ hooks: { allowConversationAccess: true } }, "community-plugin");
 function remoteDetail(overrides: Partial<ClawHubPluginDetail>) {
   mocks.remoteDetail.mockResolvedValue({
     packageName: "community/plugin",
@@ -114,11 +113,8 @@ afterEach(() => {
 beforeEach(() => {
   clearPluginMetadataLifecycleCaches();
   clearManagedPluginCatalogCache();
-  mocks.metadata.mockReset();
-  mocks.officialCatalog.mockReset();
+  Object.values(mocks).forEach((mock) => mock.mockReset());
   mocks.officialCatalog.mockResolvedValue({ source: "hosted", entries: [] });
-  mocks.mcpAuth.mockReset();
-  mocks.remoteDetail.mockReset();
 });
 
 it.each([true, false])(
@@ -218,9 +214,7 @@ it("offers installed account sign-in and follows operator configuration changes"
   expect((await inspectCurrent()).mcpAuth).toEqual(auth);
   expect(config.mcp).toBeUndefined();
 
-  config.mcp = {
-    servers: { docs: { url: "https://override.test/mcp", auth: "oauth" } },
-  };
+  config.mcp = { servers: { docs: { url: "https://override.test/mcp", auth: "oauth" } } };
   expect((await inspectCurrent()).mcpAuth).toBeUndefined();
   config.mcp.servers!.docs!.url = "https://example.test/mcp";
   expect((await inspectCurrent()).mcpAuth).toEqual(auth);
@@ -380,9 +374,7 @@ it.each([
       createTool: () => null,
     },
   });
-  const config: OpenClawConfig = {
-    plugins: { entries: { workboard: { enabled: true, config: { apiKey: value } } } },
-  };
+  const config = configFor({ enabled: true, config: { apiKey: value } });
   if (unresolved) {
     const path = "plugins.entries.workboard.config.apiKey";
     setConfigResolutionFacts(
@@ -422,17 +414,14 @@ it("inspects tracked external provenance, pinned integrity, operator grants, and
   });
 
   const inspection = await inspect({
-    config: {
-      plugins: {
-        entries: {
-          "community-plugin": {
-            enabled: false,
-            hooks: { allowPromptInjection: false, allowConversationAccess: true },
-            llm: { allowModelOverride: true },
-          },
-        },
+    config: configFor(
+      {
+        enabled: false,
+        hooks: { allowPromptInjection: false, allowConversationAccess: true },
+        llm: { allowModelOverride: true },
       },
-    },
+      "community-plugin",
+    ),
     pluginId: "community-plugin",
   });
 
@@ -472,14 +461,11 @@ it("does not misrepresent an npm SHA-1 shasum as pinned SHA-256 integrity", asyn
   });
 
   const inspection = await inspect({
-    config: { plugins: { entries: { "community-plugin": { enabled: false } } } },
+    config: configFor({ enabled: false }, "community-plugin"),
     pluginId: "community-plugin",
   });
 
-  expect(inspection.source).toEqual({
-    kind: "npm",
-    packageName: "@openclaw/community-plugin",
-  });
+  expect(inspection.source).toEqual({ kind: "npm", packageName: "@openclaw/community-plugin" });
 });
 
 it("redacts credentials from the persisted resolved spec without changing the install record", async () => {
@@ -525,13 +511,7 @@ it.each([false, true])(
     const inspection = await inspect({ pluginId: "diffs" });
 
     expect(inspection).toMatchObject({
-      plugin: {
-        id: "diffs",
-        name: "Diffs",
-        origin: "official",
-        installed: false,
-        enabled: false,
-      },
+      plugin: { id: "diffs", name: "Diffs", origin: "official", installed: false, enabled: false },
       source: {
         kind: "official-catalog",
         packageName: npm ? "@vendor/diffs-npm" : "@openclaw/diffs",

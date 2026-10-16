@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createContextEngineLogicalTurnLease } from "../agents/harness/context-engine-logical-turn.js";
-import { resolveConfigWidePluginMetadataSnapshot } from "../config/io.plugin-metadata.js";
+import { createContextEngineLogicalTurnLease as createTurn } from "../agents/harness/context-engine-logical-turn.js";
+import { resolveConfigWidePluginMetadataSnapshot as resolveMetadata } from "../config/io.plugin-metadata.js";
 import type { ConfigReplaceInput } from "../config/mutate.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { listContextEngineQuarantines } from "../context-engine/registry.js";
@@ -12,16 +12,16 @@ import {
   runOpenClawStateWriteTransaction,
 } from "../state/openclaw-state-db.js";
 import { observeMainThreadSql } from "../test-utils/main-thread-sql-spies.test-support.js";
-import { setGatewayPluginMetadataSnapshot } from "./current-plugin-metadata-snapshot.js";
-import { getGatewayPluginMetadataSnapshot } from "./current-plugin-metadata-state.js";
+import { setGatewayPluginMetadataSnapshot as setMetadata } from "./current-plugin-metadata-snapshot.js";
+import { getGatewayPluginMetadataSnapshot as currentMetadata } from "./current-plugin-metadata-state.js";
 import { resolvePluginInstallDir } from "./install-paths.js";
 import { persistPluginInstall } from "./install-persistence.js";
-import { writePersistedInstalledPluginIndex } from "./installed-plugin-index-store-write.js";
-import { readPersistedInstalledPluginIndex } from "./installed-plugin-index-store.js";
-import { loadInstalledPluginIndex } from "./installed-plugin-index.js";
+import { writePersistedInstalledPluginIndex as writeIndex } from "./installed-plugin-index-store-write.js";
+import { readPersistedInstalledPluginIndex as readIndex } from "./installed-plugin-index-store.js";
+import { loadInstalledPluginIndex as loadIndex } from "./installed-plugin-index.js";
 import { loadPluginRegistryHandle } from "./loader.js";
 import { clearPluginMetadataLifecycleCaches } from "./plugin-metadata-lifecycle.js";
-import { loadPluginMetadataSnapshot } from "./plugin-metadata-snapshot.js";
+import { loadPluginMetadataSnapshot as loadMetadata } from "./plugin-metadata-snapshot.js";
 import * as metadataWorker from "./plugin-metadata-state-worker.js";
 import { withPluginRuntimeRegistryScope } from "./runtime/gateway-request-scope.js";
 import { createColdPluginFixture } from "./test-helpers/cold-plugin-fixtures.js";
@@ -102,11 +102,9 @@ const listedPlugin = (id: string, fields = {}) => expect.objectContaining({ id, 
 
 async function persistIndex(
   config: OpenClawConfig,
-  installRecords: NonNullable<Parameters<typeof loadInstalledPluginIndex>[0]>["installRecords"],
+  installRecords: NonNullable<Parameters<typeof loadIndex>[0]>["installRecords"],
 ) {
-  await writePersistedInstalledPluginIndex(
-    loadInstalledPluginIndex({ config, env: process.env, installRecords }),
-  );
+  await writeIndex(loadIndex({ config, env: process.env, installRecords }));
 }
 
 async function useRealConfigFile(configPath: string, config: OpenClawConfig) {
@@ -119,12 +117,12 @@ async function useRealConfigFile(configPath: string, config: OpenClawConfig) {
 }
 
 function publishMetadata(config: OpenClawConfig) {
-  const boot = resolveConfigWidePluginMetadataSnapshot({
+  const boot = resolveMetadata({
     config,
     env: process.env,
     allowCurrent: false,
   });
-  setGatewayPluginMetadataSnapshot(boot, { config, env: process.env });
+  setMetadata(boot, { config, env: process.env });
   return boot;
 }
 
@@ -170,24 +168,21 @@ it("refreshes foreign install facts and requires live authority before publishin
   const loadPath = path.join(root, "configured-plugins");
   mkdirSafeDir(pluginRoot);
   mkdirSafeDir(loadPath);
-  const fixture = createColdPluginFixture({ rootDir: pluginRoot, pluginId: "external-candidate" });
+  const { pluginId: id } = createColdPluginFixture({
+    rootDir: pluginRoot,
+    pluginId: "external-candidate",
+  });
   isolateWorkspace(root);
   const config: OpenClawConfig = { plugins: { load: { paths: [loadPath] } } };
-  await writePersistedInstalledPluginIndex(
-    loadInstalledPluginIndex({ config, env: process.env, candidates: [], installRecords: {} }),
-  );
+  await writeIndex(loadIndex({ config, env: process.env, candidates: [], installRecords: {} }));
   const boot = publishMetadata(config);
-  expect(await inventory(config)).not.toContainEqual(listedPlugin(fixture.pluginId));
+  expect(await inventory(config)).not.toContainEqual(listedPlugin(id));
 
   // Simulate a separate CLI process committing without this process's cache notifications.
   runOpenClawStateWriteTransaction(({ db }) => {
     db.prepare(
       "UPDATE config_machine_state SET value_json = json_set(value_json, '$.index.installRecords', json(?)) WHERE state_key = 'plugins.installedIndex'",
-    ).run(
-      JSON.stringify({
-        [fixture.pluginId]: pathInstall(pluginRoot),
-      }),
-    );
+    ).run(JSON.stringify({ [id]: pathInstall(pluginRoot) }));
   });
 
   let current = true;
@@ -210,8 +205,8 @@ it("refreshes foreign install facts and requires live authority before publishin
         },
       }),
     ).rejects.toThrow("Plugin management authority was revoked after preparation");
-    expect(await inventory(config)).not.toContainEqual(listedPlugin(fixture.pluginId));
-    expect(getGatewayPluginMetadataSnapshot()).toBe(boot);
+    expect(await inventory(config)).not.toContainEqual(listedPlugin(id));
+    expect(currentMetadata()).toBe(boot);
   } finally {
     preparation.mockRestore();
   }
@@ -224,11 +219,9 @@ it("refreshes foreign install facts and requires live authority before publishin
     sql.restore();
   }
 
-  expect(await inventory(config)).toContainEqual(
-    listedPlugin(fixture.pluginId, { installed: true }),
-  );
-  expect(getGatewayPluginMetadataSnapshot()).toBe(boot);
-  expect(boot.byPluginId.has(fixture.pluginId)).toBe(false);
+  expect(await inventory(config)).toContainEqual(listedPlugin(id, { installed: true }));
+  expect(currentMetadata()).toBe(boot);
+  expect(boot.byPluginId.has(id)).toBe(false);
 });
 
 it("removes an npm-pack plugin from management inventory without replacing Gateway metadata", async () => {
@@ -237,7 +230,7 @@ it("removes an npm-pack plugin from management inventory without replacing Gatew
   const packageName = "@example/tgz-visible";
   const pluginRoot = resolvePluginInstallDir("tgz-visible", path.join(stateDir, "extensions"));
   mkdirSafeDir(pluginRoot);
-  const fixture = createColdPluginFixture({
+  const { pluginId: id } = createColdPluginFixture({
     rootDir: pluginRoot,
     pluginId: "tgz-visible",
     packageName,
@@ -245,39 +238,33 @@ it("removes an npm-pack plugin from management inventory without replacing Gatew
   vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
   vi.stubEnv("OPENCLAW_DISABLE_BUNDLED_PLUGINS", "1");
   const config: OpenClawConfig = {
-    plugins: { entries: { [fixture.pluginId]: { enabled: true } } },
+    plugins: { entries: { [id]: { enabled: true } } },
   };
   const installRecord = {
     source: "npm",
     spec: `${packageName}@1.0.0`,
-    sourcePath: path.join(root, `${fixture.pluginId}.tgz`),
+    sourcePath: path.join(root, `${id}.tgz`),
     installPath: pluginRoot,
     artifactKind: "npm-pack",
     artifactFormat: "tgz",
   } as const;
   const currentConfig = mockConfigFile(path.join(stateDir, "openclaw.json"), config);
-  await persistIndex(config, { [fixture.pluginId]: installRecord });
-  const boot = loadPluginMetadataSnapshot({
+  await persistIndex(config, { [id]: installRecord });
+  const boot = loadMetadata({
     config,
     env: process.env,
     preferPersisted: false,
   });
-  setGatewayPluginMetadataSnapshot(boot, { config, env: process.env });
-  expect(await inventory(config)).toContainEqual(
-    listedPlugin(fixture.pluginId, { installed: true }),
-  );
+  setMetadata(boot, { config, env: process.env });
+  expect(await inventory(config)).toContainEqual(listedPlugin(id, { installed: true }));
 
-  await uninstallManagedPlugin({ pluginId: fixture.pluginId });
+  await uninstallManagedPlugin({ pluginId: id });
 
   expect(fs.existsSync(pluginRoot)).toBe(false);
-  expect(
-    (await readPersistedInstalledPluginIndex())?.plugins.some(
-      (plugin) => plugin.pluginId === fixture.pluginId,
-    ),
-  ).toBe(false);
-  expect(await inventory(currentConfig())).not.toContainEqual(listedPlugin(fixture.pluginId));
-  expect(getGatewayPluginMetadataSnapshot()).toBe(boot);
-  expect(boot.byPluginId.has(fixture.pluginId)).toBe(true);
+  expect((await readIndex())?.plugins.some((plugin) => plugin.pluginId === id)).toBe(false);
+  expect(await inventory(currentConfig())).not.toContainEqual(listedPlugin(id));
+  expect(currentMetadata()).toBe(boot);
+  expect(boot.byPluginId.has(id)).toBe(true);
 });
 
 it("toggles a listed secondary-workspace plugin without a system owner", async () => {
@@ -285,7 +272,7 @@ it("toggles a listed secondary-workspace plugin without a system owner", async (
   const mainWorkspace = path.join(root, "main");
   const secondaryWorkspace = path.join(root, "secondary");
   const pluginRoot = path.join(secondaryWorkspace, ".openclaw", "extensions", "workspace-memory");
-  const fixture = coldFixture(pluginRoot, "workspace-memory", "memory");
+  const { pluginId: id } = coldFixture(pluginRoot, "workspace-memory", "memory");
   isolateWorkspace(root);
   const config: OpenClawConfig = {
     agents: {
@@ -295,25 +282,23 @@ it("toggles a listed secondary-workspace plugin without a system owner", async (
         secondary: { workspace: secondaryWorkspace },
       },
     },
-    plugins: { entries: { [fixture.pluginId]: { enabled: false } } },
+    plugins: { entries: { [id]: { enabled: false } } },
   };
   const currentConfig = mockConfigFile(path.join(root, "openclaw.json"), config);
   const boot = publishMetadata(config);
   expect(await inventory(config)).toContainEqual(
-    listedPlugin(fixture.pluginId, { installed: true, enabled: false }),
+    listedPlugin(id, { installed: true, enabled: false }),
   );
 
   for (const enabled of [true, false]) {
-    const result = await setManagedPluginEnabled({ pluginId: fixture.pluginId, enabled });
-    expect(result.plugin).toMatchObject({ id: fixture.pluginId, installed: true, enabled });
-    expect(currentConfig().plugins?.entries?.[fixture.pluginId]?.enabled).toBe(enabled);
+    const result = await setManagedPluginEnabled({ pluginId: id, enabled });
+    expect(result.plugin).toMatchObject({ id, installed: true, enabled });
+    expect(currentConfig().plugins?.entries?.[id]?.enabled).toBe(enabled);
     if (enabled) {
-      expect(currentConfig().plugins?.slots?.memory).toBe(fixture.pluginId);
+      expect(currentConfig().plugins?.slots?.memory).toBe(id);
     }
-    expect(getGatewayPluginMetadataSnapshot()).toBe(boot);
-    expect(boot.index.plugins.find((plugin) => plugin.pluginId === fixture.pluginId)?.enabled).toBe(
-      false,
-    );
+    expect(currentMetadata()).toBe(boot);
+    expect(boot.index.plugins.find((plugin) => plugin.pluginId === id)?.enabled).toBe(false);
   }
 });
 
@@ -376,11 +361,9 @@ it.each(["config-write", "none"] as const)(
     const configPath = path.join(stateDir, "openclaw.json");
     isolateWorkspace(root);
     let config: OpenClawConfig = {};
-    await writePersistedInstalledPluginIndex(
-      loadInstalledPluginIndex({ config, candidates: [], installRecords: {} }),
-    );
-    const boot = resolveConfigWidePluginMetadataSnapshot({ config, allowCurrent: false });
-    setGatewayPluginMetadataSnapshot(boot, { config });
+    await writeIndex(loadIndex({ config, candidates: [], installRecords: {} }));
+    const boot = resolveMetadata({ config, allowCurrent: false });
+    setMetadata(boot, { config });
     expect((await listManagedPlugins({ config })).plugins).toEqual([]);
 
     const pluginRoot = resolvePluginInstallDir(
@@ -419,9 +402,7 @@ it.each(["config-write", "none"] as const)(
       await expect(installed).rejects.toBe(rejected);
     }
     const committed = failure !== "config-write";
-    expect(
-      (await readPersistedInstalledPluginIndex())?.installRecords[fixture.pluginId] !== undefined,
-    ).toBe(committed);
+    expect((await readIndex())?.installRecords[fixture.pluginId] !== undefined).toBe(committed);
     const listed = (await listManagedPlugins({ config })).plugins.find(
       (plugin) => plugin.id === fixture.pluginId,
     );
@@ -432,7 +413,7 @@ it.each(["config-write", "none"] as const)(
       expect(listed).toBeUndefined();
       expect(applyRuntime).not.toHaveBeenCalled();
     }
-    expect(getGatewayPluginMetadataSnapshot()).toBe(boot);
+    expect(currentMetadata()).toBe(boot);
     expect(boot.byPluginId.has(fixture.pluginId)).toBe(false);
     expect(fs.existsSync(fixture.runtimeMarker)).toBe(false);
   },
@@ -450,22 +431,16 @@ it("persists management disable before a cold context-engine runtime turn", asyn
   const disabled = await setManagedPluginEnabled({ pluginId: fixture.pluginId, enabled: false });
   expect(disabled.plugin).toMatchObject({ installed: true, enabled: false });
   const fresh = await actual.readConfigFileSnapshot();
-  expect(fresh).toMatchObject({
-    valid: true,
-    config: {
-      plugins: {
-        slots: { contextEngine: fixture.pluginId },
-        entries: { [fixture.pluginId]: { enabled: false } },
-      },
-    },
-  });
+  expect(fresh.valid).toBe(true);
+  expect(fresh.config).toMatchObject(pluginConfig(pluginRoot, fixture.pluginId, false));
+  expect(fresh.config.plugins?.slots).toMatchObject({ contextEngine: fixture.pluginId });
 
   // A fresh real loader has no disabled factory; subsequent turns are baseline, not failures.
   const registry = loadPluginRegistryHandle({ config: fresh.config, cache: false });
   const warn = vi.fn();
   await withPluginRuntimeRegistryScope(registry, async () => {
     for (const runId of ["first", "second"]) {
-      const lease = await createContextEngineLogicalTurnLease({
+      const lease = await createTurn({
         config: fresh.config,
         identity: { runId, sessionId: "synthetic-session" },
         warn,

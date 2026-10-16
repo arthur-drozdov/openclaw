@@ -50,7 +50,7 @@ vi.mock("./installed-plugin-index-records.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./installed-plugin-index-records.js")>()),
   loadInstalledPluginIndexInstallRecords: async () => ({ ...mocks.records }),
   writePersistedInstalledPluginIndexInstallRecordsWithLease: async (
-    records: Record<string, import("../config/types.plugins.js").PluginInstallRecord>,
+    records: Record<string, PluginInstallRecord>,
     options: unknown,
   ) => {
     mocks.records = { ...records };
@@ -61,19 +61,8 @@ vi.mock("./installed-plugin-index-records.js", async (importOriginal) => ({
 vi.mock("./plugin-lifecycle-lease.js", () => ({
   withPluginLifecycleLease: async (
     _options: unknown,
-    run: (lease: {
-      assertOwned: () => void;
-      assertOwnedInTransaction: () => void;
-      signal: AbortSignal;
-      databasePath: string;
-    }) => Promise<unknown>,
-  ) =>
-    run({
-      assertOwned: () => undefined,
-      assertOwnedInTransaction: () => undefined,
-      signal: new AbortController().signal,
-      databasePath: "/tmp/managed-capability-consent.sqlite",
-    }),
+    run: (lease: { assertOwned: () => void }) => Promise<unknown>,
+  ) => run({ assertOwned: () => undefined }),
 }));
 
 vi.mock("./slot-selection.js", () => ({ applySlotSelectionForPlugin: mocks.slotSelection }));
@@ -94,14 +83,15 @@ const { inspectManagedPlugin, listManagedPlugins } = await import("./management-
 const { setManagedPluginEnabled } = await import("./management-mutations.js");
 
 const trackedArtifactDirs: string[] = [];
+const communityId = "community-plugin";
+const communityName = "Community Plugin";
 
 type ConsentOptions = Parameters<typeof resolvePluginCapabilityConsent>[0];
 const consent = (options: Partial<ConsentOptions> = {}) =>
-  resolvePluginCapabilityConsent({ config: {}, env: {}, pluginId: "community-plugin", ...options });
-const inspectCommunity = () =>
-  inspectManagedPlugin({ config: {}, env: {}, pluginId: "community-plugin" });
+  resolvePluginCapabilityConsent({ config: {}, env: {}, pluginId: communityId, ...options });
+const inspectCommunity = () => inspectManagedPlugin({ config: {}, env: {}, pluginId: communityId });
 const enable = (options: Partial<Parameters<typeof setManagedPluginEnabled>[0]> = {}) =>
-  setManagedPluginEnabled({ pluginId: "community-plugin", enabled: true, env: {}, ...options });
+  setManagedPluginEnabled({ pluginId: communityId, enabled: true, env: {}, ...options });
 function artifactHandler(
   options: Partial<Parameters<typeof createManagedPluginArtifactConsentHandler>[0]> = {},
 ) {
@@ -148,7 +138,7 @@ function discoveredMetadata(
   };
 }
 
-function createConsentArtifact(pluginId = "community-plugin", providers: string[] = []): string {
+function createConsentArtifact(pluginId = communityId, providers: string[] = []): string {
   const rootDir = makeTrackedTempDir("managed-capability-consent", trackedArtifactDirs);
   writeConsentArtifact(rootDir, pluginId, providers);
   return rootDir;
@@ -158,41 +148,37 @@ function writeConsentArtifact(rootDir: string, pluginId: string, providers: stri
   createColdPluginFixture({
     rootDir,
     pluginId,
-    manifest: { ...emptySurface, name: "Community Plugin", providers },
+    manifest: { ...emptySurface, name: communityName, providers },
   });
 }
 
-function installRecord(overrides: Partial<PluginInstallRecord> = {}): PluginInstallRecord {
+function installRecord(
+  overrides: Partial<PluginInstallRecord> = {},
+): PluginInstallRecord & { installPath: string } {
   return {
     source: "npm",
-    installPath: overrides.installPath ?? createConsentArtifact(),
     integrity: "sha512-verified-artifact",
     ...overrides,
+    installPath: overrides.installPath ?? createConsentArtifact(),
   };
 }
 
-function artifactReviewToken(record: PluginInstallRecord): string {
-  if (!record.installPath) {
-    throw new Error("test plugin must have a tracked artifact path");
-  }
+function artifactReviewToken(record: PluginInstallRecord & { installPath: string }): string {
   return computeDeclaredSurfaceHash(resolvePluginArtifactDeclaredSurface(record.installPath));
 }
 
-function configureExternalPlugin(
-  record: PluginInstallRecord,
-  enabled = false,
-): ReturnType<typeof metadataSnapshot> {
-  mocks.records = { "community-plugin": record };
+function configureExternalPlugin(record: PluginInstallRecord) {
+  mocks.records = { [communityId]: record };
   const snapshot = metadataSnapshot({
-    id: "community-plugin",
-    name: "Community Plugin",
-    enabled,
+    id: communityId,
+    name: communityName,
+    enabled: false,
     origin: "global",
     installRecord: record,
   });
   if (record.installPath) {
     snapshot.index.plugins[0]!.rootDir = record.installPath;
-    snapshot.byPluginId.get("community-plugin")!.rootDir = record.installPath;
+    snapshot.byPluginId.get(communityId)!.rootDir = record.installPath;
   }
   mocks.metadata.mockImplementation(() => ({
     ...snapshot,
@@ -223,7 +209,7 @@ beforeEach(() => {
 
 it.each([
   { name: "global disable", plugins: { enabled: false }, reason: "plugins disabled" },
-  { name: "denylist", plugins: { deny: ["community-plugin"] }, reason: "blocked by denylist" },
+  { name: "denylist", plugins: { deny: [communityId] }, reason: "blocked by denylist" },
   {
     name: "restrictive allowlist",
     plugins: { allow: ["other-plugin"] },
@@ -251,7 +237,7 @@ it.each([
 );
 
 it.each([
-  { name: "admin omission", pluginId: "community-plugin", allowlistPolicy: undefined },
+  { name: "admin omission", pluginId: communityId, allowlistPolicy: undefined },
   {
     name: "explicit-selection exception",
     pluginId: "clickclack",
@@ -265,11 +251,7 @@ it.each([
     generation: 2,
     pluginIds: [pluginId],
   }));
-  await enable({
-    pluginId,
-    ...(allowlistPolicy ? { allowlistPolicy } : {}),
-    applyRuntime,
-  });
+  await enable({ pluginId, ...(allowlistPolicy ? { allowlistPolicy } : {}), applyRuntime });
   expect(mocks.replaceConfig).toHaveBeenCalledWith(
     expect.objectContaining({
       sourceConfig: expect.objectContaining({
@@ -328,10 +310,7 @@ it.each(officialSources)(
 
 it("requires review for a custom ClawHub server", async () => {
   const sourceRecord = { ...officialSources[1]!, clawhubUrl: "https://plugins.example" };
-  const handler = artifactHandler({
-    source: sourceRecord.source,
-    spec: sourceRecord.spec,
-  });
+  const handler = artifactHandler({ source: sourceRecord.source, spec: sourceRecord.spec });
   await expect(commitArtifact(handler, officialArtifact(), sourceRecord)).rejects.toMatchObject({
     capabilityConsent: { pluginId: "diffs" },
   });
@@ -366,9 +345,7 @@ it("does not carry a first-party exemption into an unverified fallback stage", a
 it("enables and reports a verified official install without legacy acceptance", async () => {
   const rootDir = officialArtifact();
   const record = { ...officialSources[0]!, installPath: rootDir };
-  const config = {
-    plugins: { load: { paths: [rootDir] }, entries: { diffs: { enabled: true } } },
-  };
+  const config = { plugins: { load: { paths: [rootDir] }, entries: { diffs: { enabled: true } } } };
   const env = isolatedEnv(rootDir);
   const metadata = discoveredMetadata(config, env, { diffs: record });
   mocks.records = { diffs: record };
@@ -386,15 +363,12 @@ it("enables and reports a verified official install without legacy acceptance", 
 it("rejects enabling an unaccepted plugin with only its reviewed-surface challenge", async () => {
   const record = installRecord();
   const snapshot = configureExternalPlugin(record);
-  const manifest = snapshot.byPluginId.get("community-plugin")!;
+  const manifest = snapshot.byPluginId.get(communityId)!;
   manifest.providers.push("community-provider");
-  writeConsentArtifact(record.installPath!, "community-plugin", ["community-provider"]);
+  writeConsentArtifact(record.installPath!, communityId, ["community-provider"]);
 
   await expect(enable()).rejects.toMatchObject({
-    capabilityConsent: {
-      pluginId: "community-plugin",
-      reviewToken: artifactReviewToken(record),
-    },
+    capabilityConsent: { pluginId: communityId, reviewToken: artifactReviewToken(record) },
     message: expect.stringContaining(
       "Rerun the openclaw plugins install, enable, update, or reload command with --accept-capabilities after reviewing the plugin.",
     ),
@@ -409,14 +383,14 @@ it("persists an interactive acknowledgment for a home-relative path and reuses i
   const record = installRecord({ installPath });
   const snapshot = configureExternalPlugin(record);
   snapshot.index.plugins[0]!.rootDir = artifactDir;
-  snapshot.byPluginId.get("community-plugin")!.rootDir = artifactDir;
+  snapshot.byPluginId.get(communityId)!.rootDir = artifactDir;
   const reviewToken = computeDeclaredSurfaceHash(resolvePluginArtifactDeclaredSurface(artifactDir));
   const onCapabilityConsent = vi.fn<PluginCapabilityConsentHandler>(async (review) => ({
     reviewToken: review.reviewToken,
   }));
   await consent({ env, onCapabilityConsent });
 
-  const persisted = mocks.records["community-plugin"]!;
+  const persisted = mocks.records[communityId]!;
   expect(persisted).toMatchObject({
     installPath,
     acceptedSurfaceHash: reviewToken,
@@ -424,7 +398,7 @@ it("persists an interactive acknowledgment for a home-relative path and reuses i
     acceptedSurfaceAt: expect.any(String),
   });
   expect(mocks.writeRecords).toHaveBeenCalledWith(
-    expect.objectContaining({ "community-plugin": persisted }),
+    expect.objectContaining({ [communityId]: persisted }),
     expect.objectContaining({ config: {}, env, lease: expect.any(Object) }),
   );
 
@@ -436,7 +410,7 @@ it("persists an interactive acknowledgment for a home-relative path and reuses i
 it("inspects the actual configured override and its package siblings before accepting either", async () => {
   const record = installRecord();
   const rootDir = record.installPath!;
-  writeConsentArtifact(rootDir, "community-plugin", ["package-provider"]);
+  writeConsentArtifact(rootDir, communityId, ["package-provider"]);
   for (const [directory, entry, provider] of [
     ["a", "first", "configured-provider"],
     ["b", "second", "ignored-provider"],
@@ -449,7 +423,7 @@ it("inspects the actual configured override and its package siblings before acce
   fs.writeFileSync(
     path.join(rootDir, "package.json"),
     JSON.stringify({
-      name: "community-plugin",
+      name: communityId,
       openclaw: { extensions: ["./a/first.cjs", "./b/second.cjs"] },
     }),
   );
@@ -463,7 +437,7 @@ it("inspects the actual configured override and its package siblings before acce
     },
   };
   const env = isolatedEnv(rootDir);
-  mocks.records = { "community-plugin": record };
+  mocks.records = { [communityId]: record };
   const metadata = discoveredMetadata(config, env);
   const manifests = metadata.byPluginId;
   mocks.metadata.mockImplementation(() => ({
@@ -485,18 +459,15 @@ it("inspects the actual configured override and its package siblings before acce
     ["package-provider"],
   ]);
   for (const inspection of inspections) {
-    expect(inspection.declared).toEqual(declared);
-    expect(inspection.reviewToken).toBe(reviewToken);
+    expect({ declared: inspection.declared, reviewToken: inspection.reviewToken }).toEqual({
+      declared,
+      reviewToken,
+    });
     await expect(
-      resolvePluginCapabilityConsent({
-        config,
-        env,
-        pluginId: inspection.plugin.id,
-        acknowledge: { reviewToken },
-      }),
+      consent({ config, env, pluginId: inspection.plugin.id, acknowledge: { reviewToken } }),
     ).resolves.toBeUndefined();
   }
-  expect(mocks.records["community-plugin"]).toMatchObject({
+  expect(mocks.records[communityId]).toMatchObject({
     acceptedSurface: { providers: ["configured-provider", "package-provider"] },
     acceptedSurfaceHash: reviewToken,
   });
@@ -514,12 +485,12 @@ it("rechecks the installed artifact after interactive consent yields", async () 
   const reviewedToken = artifactReviewToken(record);
   const onCapabilityConsent = vi.fn<PluginCapabilityConsentHandler>(async (review) => {
     await Promise.resolve();
-    writeConsentArtifact(record.installPath!, "community-plugin", ["unreviewed-provider"]);
+    writeConsentArtifact(record.installPath!, communityId, ["unreviewed-provider"]);
     return { reviewToken: review.reviewToken };
   });
 
   await expect(consent({ onCapabilityConsent })).rejects.toMatchObject({
-    capabilityConsent: { pluginId: "community-plugin" },
+    capabilityConsent: { pluginId: communityId },
   });
   expect(onCapabilityConsent).toHaveBeenCalledWith(
     expect.objectContaining({ reviewToken: reviewedToken }),
@@ -540,10 +511,8 @@ it("reports newly declared capabilities when the installed manifest outgrows acc
       acceptedSurfaceAt: "2026-08-25T00:00:00.000Z",
     }),
   );
-  snapshot.byPluginId.get("community-plugin")!.providers.push("new-provider");
-  writeConsentArtifact(mocks.records["community-plugin"]!.installPath!, "community-plugin", [
-    "new-provider",
-  ]);
+  snapshot.byPluginId.get(communityId)!.providers.push("new-provider");
+  writeConsentArtifact(mocks.records[communityId]!.installPath!, communityId, ["new-provider"]);
 
   await expect(consent()).rejects.toMatchObject({
     capabilityConsent: {
@@ -567,36 +536,34 @@ it("retains a rejected community install for inspection and refreshes stale revi
   const firstReviewToken = computeDeclaredSurfaceHash(
     resolvePluginArtifactDeclaredSurface(artifactDir),
   );
-  const firstHandler = artifactHandler({
-    spec: "community-plugin",
-  });
+  const firstHandler = artifactHandler({ spec: communityId });
 
   await expect(
-    commitArtifact(firstHandler, artifactDir, undefined, "community-plugin"),
+    commitArtifact(firstHandler, artifactDir, undefined, communityId),
   ).rejects.toMatchObject({
-    capabilityConsent: { pluginId: "community-plugin", reviewToken: firstReviewToken },
+    capabilityConsent: { pluginId: communityId, reviewToken: firstReviewToken },
   });
 
   const firstInspection = await inspectCommunity();
   expect(firstInspection).toMatchObject({
-    plugin: { id: "community-plugin", name: "Community Plugin", installed: false },
+    plugin: { id: communityId, name: communityName, installed: false },
     declared: { providers: [] },
     reviewToken: firstReviewToken,
   });
 
-  writeConsentArtifact(artifactDir, "community-plugin", ["unreviewed-provider"]);
+  writeConsentArtifact(artifactDir, communityId, ["unreviewed-provider"]);
   const refreshedToken = computeDeclaredSurfaceHash(
     resolvePluginArtifactDeclaredSurface(artifactDir),
   );
   const staleHandler = artifactHandler({
-    spec: "community-plugin",
+    spec: communityId,
     acknowledgeCapabilities: { reviewToken: firstReviewToken },
   });
 
   await expect(
-    commitArtifact(staleHandler, artifactDir, undefined, "community-plugin"),
+    commitArtifact(staleHandler, artifactDir, undefined, communityId),
   ).rejects.toMatchObject({
-    capabilityConsent: { pluginId: "community-plugin", reviewToken: refreshedToken },
+    capabilityConsent: { pluginId: communityId, reviewToken: refreshedToken },
   });
   await expect(inspectCommunity()).resolves.toMatchObject({
     declared: { providers: ["unreviewed-provider"] },

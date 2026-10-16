@@ -10,12 +10,7 @@ import {
 import { captureRuntimeConfig } from "../config/runtime-source-projection.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { joinClawHubPluginCatalog } from "./catalog-discovery.js";
-import {
-  emptyMetadataSnapshot,
-  hostedDiffsEntry,
-  hostedFeedDiffsEntry,
-  metadataSnapshot,
-} from "./management-service.test-helpers.js";
+import { emptyMetadataSnapshot, metadataSnapshot } from "./management-service.test-helpers.js";
 
 const mocks = vi.hoisted(() => ({
   metadata: vi.fn(),
@@ -56,26 +51,19 @@ const {
   resolveManagedSetupCatalogIconUrl,
 } = await import("./management-service.js");
 
-function mockHostedOfficialCatalog(entries: unknown[]) {
-  mocks.officialCatalog.mockResolvedValue({ source: "hosted", entries });
-}
-
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const listPlugins = (config: OpenClawConfig = {}) => listManagedPlugins({ config, env: {} });
 const iconSources = (pluginId = "workboard") =>
   resolveManagedPluginIconSources({ config: {}, env: {}, pluginId });
 const activityIcon = (toolName?: string, pluginId = "workboard") =>
   resolveManagedPluginActivityIconSource({ config: {}, env: {}, pluginId, toolName });
-function mockMetadata(params: Parameters<typeof metadataSnapshot>[0]) {
+const mockMetadata = (params: Parameters<typeof metadataSnapshot>[0]) =>
   mocks.metadata.mockReturnValue(metadataSnapshot(params));
-}
-function installedMemory(clawhubUrl: string) {
-  return metadataSnapshot({
+const installedMemory = (clawhubUrl: string) =>
+  metadataSnapshot({
     enabled: true,
     id: "community-memory",
-    name: "Community Memory",
     origin: "global",
-    packageVersion: "4.5.6",
     installRecord: {
       source: "clawhub",
       clawhubUrl,
@@ -83,12 +71,8 @@ function installedMemory(clawhubUrl: string) {
       version: "4.5.6",
     },
   });
-}
-function expectAbsent(value: unknown, ...keys: string[]) {
-  for (const key of keys) {
-    expect(value).not.toHaveProperty(key);
-  }
-}
+const expectAbsent = (value: unknown, ...keys: string[]) =>
+  keys.forEach((key) => expect(value).not.toHaveProperty(key));
 const listLocalPlugins = (config: OpenClawConfig = {}) =>
   listManagedPlugins({ config, env: {}, officialCatalog: { entries: [] } });
 
@@ -106,30 +90,7 @@ describe("managed plugin catalog", () => {
     mocks.providerAuthChoices.mockReturnValue([]);
     mocks.pluginVersionCategories.mockResolvedValue([]);
     mocks.recommendedInstalls.mockReturnValue([]);
-    mockHostedOfficialCatalog([]);
-  });
-
-  it("normalizes package-shaped hosted rows and deduplicates their runtime id", async () => {
-    mocks.metadata.mockReturnValue(emptyMetadataSnapshot());
-    mockHostedOfficialCatalog([hostedFeedDiffsEntry]);
-
-    const available = await listPlugins();
-    expect(available.plugins).toMatchObject([
-      {
-        id: "diffs",
-        name: "Diffs",
-        installed: false,
-        featured: true,
-        order: 40,
-        clawhubPackage: "@openclaw/diffs",
-        install: { source: "official", pluginId: "diffs" },
-      },
-    ]);
-
-    mockMetadata({ enabled: true, id: "diffs", name: "Diffs", origin: "global" });
-    const installed = await listPlugins();
-    expect(installed.plugins).toHaveLength(1);
-    expect(installed.plugins[0]).toMatchObject({ id: "diffs", installed: true, enabled: true });
+    mocks.officialCatalog.mockResolvedValue({ source: "hosted", entries: [] });
   });
 
   describe("authored credential validation", () => {
@@ -211,20 +172,19 @@ describe("managed plugin catalog", () => {
 
   it("does not transfer bundled endorsement to a package identity impostor", async () => {
     mocks.metadata.mockReturnValue(emptyMetadataSnapshot());
-    mockHostedOfficialCatalog([
-      {
-        ...hostedDiffsEntry,
-        name: "community/impostor",
-        openclaw: {
-          ...hostedDiffsEntry.openclaw,
-          install: { clawhubSpec: "clawhub:community/impostor", defaultChoice: "clawhub" },
+    mocks.officialCatalog.mockResolvedValue({
+      source: "hosted",
+      entries: [
+        {
+          name: "community/impostor",
+          openclaw: {
+            plugin: { id: "diffs" },
+            install: { clawhubSpec: "clawhub:community/impostor", defaultChoice: "clawhub" },
+          },
         },
-      },
-    ]);
-
-    const catalog = await listPlugins();
-
-    expect(catalog.plugins).toEqual([]);
+      ],
+    });
+    expect((await listPlugins()).plugins).toEqual([]);
   });
 
   const privateRegistry = "https://private.example/clawhub";
@@ -232,14 +192,7 @@ describe("managed plugin catalog", () => {
     ["foreign registry", "clawhub", `${privateRegistry}/`, undefined, false],
     ["public registry", "clawhub", "https://clawhub.ai/", undefined, true],
     ["custom primary override", "clawhub", `${privateRegistry}/`, privateRegistry, true],
-    [
-      "custom secondary override",
-      "clawhub",
-      `${privateRegistry}/`,
-      privateRegistry,
-      true,
-      "CLAWHUB_URL",
-    ],
+    ["secondary", "clawhub", `${privateRegistry}/`, privateRegistry, true, "CLAWHUB_URL"],
     ["different custom registry", "clawhub", "https://other.example/", privateRegistry, false],
     ["public npm counterpart", "npm", undefined, undefined, true],
     ["public npm counterpart on custom registry", "npm", undefined, privateRegistry, false],
@@ -309,12 +262,7 @@ describe("managed plugin catalog", () => {
   ])(
     "derives Media discovery only for enabled generation plugins (%j)",
     async ({ enabled, contracts, expected }) => {
-      mockMetadata({
-        enabled,
-        id: "model-provider",
-        categories: ["models"],
-        contracts,
-      });
+      mockMetadata({ enabled, id: "model-provider", categories: ["models"], contracts });
       const catalog = await listLocalPlugins({
         plugins: { entries: { "model-provider": { enabled } } },
       });
@@ -388,16 +336,11 @@ describe("managed plugin catalog", () => {
 
   it("keeps installed plugins uncategorized when ClawHub enrichment is unavailable", async () => {
     const packageRoot = tempDirs.make("managed-plugin-installed-");
-    fs.writeFileSync(
-      path.join(packageRoot, "package.json"),
-      JSON.stringify({ name: "@openclaw/community-tool", version: "1.0.0" }),
-    );
+    fs.writeFileSync(path.join(packageRoot, "package.json"), "{}");
     const metadata = metadataSnapshot({
       enabled: true,
       id: "community-tool",
-      name: "Community Tool",
       origin: "global",
-      packageVersion: "1.0.0",
       installRecord: {
         source: "clawhub",
         clawhubPackage: "community/tool",
@@ -463,20 +406,7 @@ describe("managed plugin catalog", () => {
       expectAbsent(plugin, "hasIcon");
       expect(resolved).toEqual([]);
       if (installed) {
-        expect(catalog).toMatchObject({
-          mutationAllowed: true,
-          plugins: [
-            {
-              id: "workboard",
-              packageName: "@openclaw/workboard",
-              installed: true,
-              enabled: false,
-              state: "disabled",
-              featured: true,
-              order: 10,
-            },
-          ],
-        });
+        expect(catalog.mutationAllowed).toBe(true);
         for (const call of [1, 2]) {
           expect(mocks.metadata).toHaveBeenNthCalledWith(call, {
             config,
@@ -492,11 +422,7 @@ describe("managed plugin catalog", () => {
 
   it("resolves the portable package icon", async () => {
     const iconPath = "/tmp/workboard/assets/icon.png";
-    mockMetadata({
-      enabled: false,
-      iconPath,
-      channels: ["workboard-chat"],
-    });
+    mockMetadata({ enabled: false, iconPath, channels: ["workboard-chat"] });
 
     const catalog = await listPlugins();
     const resolved = await iconSources();

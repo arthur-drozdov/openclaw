@@ -27,9 +27,9 @@ vi.mock("./plugin-metadata-snapshot.js", async (importOriginal) => ({
     if (mocks.currentMetadata !== undefined) {
       return mocks.currentMetadata;
     }
-    const metadata = mocks.metadata(...args);
-    mocks.currentMetadata = metadata;
-    return metadata;
+    const loaded = mocks.metadata(...args);
+    mocks.currentMetadata = loaded;
+    return loaded;
   },
 }));
 
@@ -48,6 +48,7 @@ vi.mock("./official-external-plugin-catalog.js", async (importOriginal) => {
   };
 });
 
+const { metadata, officialCatalog, preparePackage } = mocks;
 const { listManagedPlugins } = await import("./management-service.js");
 const emptyCatalog = { source: "hosted" as const, entries: [] };
 const list = (config: OpenClawConfig = {}, env = {}) => listManagedPlugins({ config, env });
@@ -71,42 +72,40 @@ function metadataSnapshot(pluginId?: string) {
   };
 }
 
-function dependencyMetadataSnapshot({
-  pluginId,
-  origin = "global",
-  enabledByDefault,
-  providers,
-  channels,
-  packageBuild,
-  dependencies = {},
-}: {
-  pluginId: string;
-  origin?: "global" | "bundled";
-  enabledByDefault?: boolean;
-  providers?: string[];
-  channels?: string[];
-  packageBuild?: { bundledDist?: boolean };
-  dependencies?: Record<string, string>;
-}) {
+function pluginMetadata(
+  pluginId: string,
+  options: {
+    origin?: "global" | "bundled";
+    enabledByDefault?: boolean;
+    providers?: string[];
+    channels?: string[];
+    packageBuild?: { bundledDist?: boolean };
+    dependencies?: Record<string, string>;
+  } = {},
+) {
   const snapshot = metadataSnapshot(pluginId);
   const rootDir = `/__openclaw_plugin_dependency_health__/${pluginId}`;
-  const shared = { rootDir, origin, ...(enabledByDefault ? { enabledByDefault: true } : {}) };
+  const shared = {
+    rootDir,
+    origin: options.origin ?? "global",
+    ...(options.enabledByDefault ? { enabledByDefault: true } : {}),
+  };
   const record = {
     ...snapshot.index.plugins[0]!,
     ...shared,
-    contributions: { providers, channels },
-    ...(packageBuild ? { packageBuild } : {}),
+    contributions: { providers: options.providers, channels: options.channels },
+    ...(options.packageBuild ? { packageBuild: options.packageBuild } : {}),
   };
   const manifest = {
     ...shared,
     id: pluginId,
     name: pluginId,
-    channels: channels ?? [],
-    providers: providers ?? [],
+    channels: options.channels ?? [],
+    providers: options.providers ?? [],
     cliBackends: [],
     skills: [],
     source: `${rootDir}/index.js`,
-    packageDependencies: dependencies,
+    packageDependencies: options.dependencies ?? {},
   };
   return {
     ...snapshot,
@@ -117,31 +116,31 @@ function dependencyMetadataSnapshot({
 }
 
 beforeEach(() => {
-  mocks.metadata.mockReset().mockReturnValue(metadataSnapshot());
-  mocks.officialCatalog.mockReset().mockResolvedValue(emptyCatalog);
-  mocks.preparePackage.mockClear();
+  metadata.mockReset().mockReturnValue(metadataSnapshot());
+  officialCatalog.mockReset().mockResolvedValue(emptyCatalog);
+  preparePackage.mockClear();
   clearPluginMetadataLifecycleCaches();
 });
 
 it("serves the first plugins.list load from prewarmed metadata and official catalog caches", async () => {
-  mocks.metadata
+  metadata
     .mockReturnValueOnce(metadataSnapshot())
     .mockReturnValueOnce(metadataSnapshot("fresh-plugin"));
-  mocks.officialCatalog.mockResolvedValueOnce({
+  officialCatalog.mockResolvedValueOnce({
     source: "hosted",
     entries: [hostedFeedDiffsEntry],
   });
 
   const prewarmed = await list();
-  const coldPreparations = mocks.preparePackage.mock.calls.length;
-  mocks.preparePackage.mockClear();
+  const coldPreparations = preparePackage.mock.calls.length;
+  preparePackage.mockClear();
   const firstHandlerLoad = await list();
 
   expect(prewarmed.plugins).toEqual([expect.objectContaining({ id: "diffs" })]);
   expect(firstHandlerLoad.plugins).toEqual(prewarmed.plugins);
-  expect(mocks.metadata).toHaveBeenCalledTimes(1);
-  expect(mocks.officialCatalog).toHaveBeenCalledTimes(1);
-  expect(mocks.preparePackage.mock.calls.length).toBeLessThan(coldPreparations);
+  expect(metadata).toHaveBeenCalledTimes(1);
+  expect(officialCatalog).toHaveBeenCalledTimes(1);
+  expect(preparePackage.mock.calls.length).toBeLessThan(coldPreparations);
 
   firstHandlerLoad.plugins.length = 0;
   const secondHandlerLoad = await list();
@@ -151,27 +150,27 @@ it("serves the first plugins.list load from prewarmed metadata and official cata
 
   const refreshed = await list();
 
-  expect(mocks.metadata).toHaveBeenCalledTimes(2);
-  expect(mocks.officialCatalog).toHaveBeenCalledTimes(2);
+  expect(metadata).toHaveBeenCalledTimes(2);
+  expect(officialCatalog).toHaveBeenCalledTimes(2);
   expect(refreshed.plugins).toEqual([
     expect.objectContaining({ id: "fresh-plugin", installed: true, enabled: true }),
   ]);
 });
 
 it("retries a failed official catalog prewarm and keeps the recovered catalog process-stable", async () => {
-  mocks.officialCatalog.mockRejectedValueOnce(new Error("transient catalog bootstrap"));
+  officialCatalog.mockRejectedValueOnce(new Error("transient catalog bootstrap"));
 
   await expect(list()).rejects.toThrow("transient catalog bootstrap");
   await expect(list()).resolves.toMatchObject({ plugins: [] });
   await expect(list()).resolves.toMatchObject({ plugins: [] });
-  expect(mocks.officialCatalog).toHaveBeenCalledTimes(2);
+  expect(officialCatalog).toHaveBeenCalledTimes(2);
 });
 
 it("uses current config after awaiting the hosted catalog", async () => {
   const config = { plugins: { entries: { "phase-plugin": { enabled: true } } } };
   const hosted = createDeferred<typeof emptyCatalog>();
-  mocks.metadata.mockReturnValue(dependencyMetadataSnapshot({ pluginId: "phase-plugin" }));
-  mocks.officialCatalog.mockReturnValue(hosted.promise);
+  metadata.mockReturnValue(pluginMetadata("phase-plugin"));
+  officialCatalog.mockReturnValue(hosted.promise);
 
   const pending = list(config);
   config.plugins.entries["phase-plugin"].enabled = false;
@@ -197,8 +196,7 @@ it.each(["compat", "allowlist"] as const)(
         selectedEnv?.OPENCLAW_STATE_DIR === env.OPENCLAW_STATE_DIR ? selectedMode : "compat",
       );
     try {
-      const provider = dependencyMetadataSnapshot({
-        pluginId: "bundled-provider",
+      const provider = pluginMetadata("bundled-provider", {
         origin: "bundled",
         enabledByDefault: true,
         providers: ["fixture-provider"],
@@ -207,12 +205,11 @@ it.each(["compat", "allowlist"] as const)(
           ? { packageBuild: { bundledDist: false }, dependencies: { "missing-runtime": "1.0.0" } }
           : {}),
       });
-      const ordinary = dependencyMetadataSnapshot({
-        pluginId: "bundled-ordinary",
+      const ordinary = pluginMetadata("bundled-ordinary", {
         origin: "bundled",
         enabledByDefault: true,
       });
-      mocks.metadata.mockReturnValue({
+      metadata.mockReturnValue({
         ...provider,
         index: {
           ...provider.index,
@@ -229,10 +226,8 @@ it.each(["compat", "allowlist"] as const)(
         state: providerEnabled ? "enabled" : "disabled",
       });
       expect(providerEntry).not.toHaveProperty("error");
-      expect(catalog.plugins.find((plugin) => plugin.id === "bundled-ordinary")).toMatchObject({
-        enabled: false,
-        state: "disabled",
-      });
+      const ordinaryEntry = catalog.plugins.find((plugin) => plugin.id === "bundled-ordinary");
+      expect(ordinaryEntry).toMatchObject({ enabled: false, state: "disabled" });
       expect(catalog.diagnostics).toEqual([]);
     } finally {
       readMode.mockRestore();
@@ -242,12 +237,12 @@ it.each(["compat", "allowlist"] as const)(
 
 it("keeps a refreshed catalog when an older lifecycle generation rejects later", async () => {
   const retiredCatalog = createDeferred<typeof emptyCatalog>();
-  mocks.officialCatalog.mockReturnValueOnce(retiredCatalog.promise);
+  officialCatalog.mockReturnValueOnce(retiredCatalog.promise);
 
   const retiredLoad = list();
   const retiredFailure = expect(retiredLoad).rejects.toThrow("retired catalog bootstrap");
   await Promise.resolve();
-  expect(mocks.officialCatalog).toHaveBeenCalledTimes(1);
+  expect(officialCatalog).toHaveBeenCalledTimes(1);
 
   clearPluginMetadataLifecycleCaches();
 
@@ -256,13 +251,12 @@ it("keeps a refreshed catalog when an older lifecycle generation rejects later",
   await retiredFailure;
 
   await expect(list()).resolves.toMatchObject({ plugins: [] });
-  expect(mocks.officialCatalog).toHaveBeenCalledTimes(2);
+  expect(officialCatalog).toHaveBeenCalledTimes(2);
 });
 
 it("checks dependency health once per immutable metadata lifecycle", async () => {
-  mocks.metadata.mockImplementation(() =>
-    dependencyMetadataSnapshot({
-      pluginId: "lifecycle-missing-runtime",
+  metadata.mockImplementation(() =>
+    pluginMetadata("lifecycle-missing-runtime", {
       origin: "global",
       enabledByDefault: true,
       dependencies: { "missing-runtime": "1.0.0" },
