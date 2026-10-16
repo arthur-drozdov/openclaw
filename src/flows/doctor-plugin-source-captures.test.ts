@@ -15,17 +15,23 @@ import {
   runDoctorHealthContributionList,
 } from "./doctor-health-contributions.test-support.js";
 
-const { note, readCommand, census, processMembers, ps, readProcessCommand } = vi.hoisted(() => ({
-  note: vi.fn(),
-  readCommand: vi.fn<() => Promise<GatewayServiceCommandConfig | null>>(),
-  census: vi.fn<typeof inspectOtherOpenClawProcesses>(),
-  processMembers: vi.fn(),
-  ps: vi.fn(),
-  readProcessCommand: vi.fn(),
-}));
+const { note, readCommand, census, processMembers, ps, readProcessCommand, nativeDarwinCensus } =
+  vi.hoisted(() => ({
+    note: vi.fn(),
+    readCommand: vi.fn<() => Promise<GatewayServiceCommandConfig | null>>(),
+    census: vi.fn<typeof inspectOtherOpenClawProcesses>(),
+    processMembers: vi.fn(),
+    ps: vi.fn(),
+    nativeDarwinCensus: vi.fn(),
+    readProcessCommand: vi.fn(),
+  }));
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),
   spawnSync: ps,
+}));
+// mock-isolation: Native Darwin census must use the same synthetic PIDs as ps.
+vi.mock("../process/supervisor/darwin-bun-process-census.js", () => ({
+  readDarwinBunProcessCensus: nativeDarwinCensus,
 }));
 vi.mock("@openclaw/proc-safe/inspect", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@openclaw/proc-safe/inspect")>()),
@@ -102,6 +108,7 @@ afterEach(() => {
   census.mockReset();
   processMembers.mockReset();
   ps.mockReset();
+  nativeDarwinCensus.mockReset();
   readProcessCommand.mockReset();
 });
 
@@ -184,6 +191,10 @@ it.each([
       status: 0,
       stdout: `${process.pid} ${process.pid} S 0 ${uid}\n${peer} ${peer} S 0 ${sameUid ? uid : uid + 1}\n`,
     });
+    nativeDarwinCensus.mockReturnValue([
+      { pid: process.pid, pgid: process.pid, ppid: 0, state: "S", uid },
+      { pid: peer, pgid: peer, ppid: 0, state: "S", uid: sameUid ? uid : uid + 1 },
+    ]);
     readProcessCommand.mockImplementation((pid: number) => {
       if (pid === peer) {
         throw new ProcSafeError("access-denied", "Process arguments denied");
