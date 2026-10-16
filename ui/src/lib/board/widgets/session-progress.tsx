@@ -1,7 +1,6 @@
 import type { BoardGetParams, ProgressCardGetParams } from "@openclaw/gateway-protocol";
 import { createEffect, createMemo, createSignal, onSettled, Show, untrack } from "solid-js";
 import { SessionProgressCard } from "../../../components/session-progress-card-solid.tsx";
-import { defineSolidBridge, type SolidBridgeElement } from "../../../lit/solid-bridge.ts";
 import { useOptionalApplication } from "../../reactive/context.ts";
 import { projectProgressCard } from "../../reactive/domain-keyed.ts";
 import { t } from "../../reactive/i18n.ts";
@@ -13,6 +12,7 @@ import {
 import { isSessionRunActive } from "../../session-run-state.ts";
 import { parseAgentSessionKey } from "../../sessions/session-key.ts";
 import { sessionProgressTargetQuery } from "../../sessions/session-requests.ts";
+import { defineSolidBridge, type SolidBridgeElement } from "../../solid-bridge.ts";
 import type { BoardWidget } from "../types.ts";
 
 type SessionProgressWidgetProps = {
