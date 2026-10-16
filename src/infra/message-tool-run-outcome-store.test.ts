@@ -1,6 +1,6 @@
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSqliteWorkerFault } from "../../test/helpers/sqlite-worker-fault.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { memorySessionActorOwners } from "../config/sessions/session-actor-memory-owner.js";
@@ -29,26 +29,36 @@ const outcomeFault = useSqliteWorkerFault([
 ]);
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
-function createEnv(): NodeJS.ProcessEnv {
-  return { OPENCLAW_STATE_DIR: tempDirs.make("openclaw-message-tool-outcome-") };
-}
+let env: NodeJS.ProcessEnv;
+let target: { agentId: string; env: NodeJS.ProcessEnv };
+beforeEach(() => {
+  env = { OPENCLAW_STATE_DIR: tempDirs.make("openclaw-message-tool-outcome-") };
+  target = { agentId: "main", env };
+});
 
-function outcomeInput(overrides: Partial<Parameters<typeof recordMessageToolRunOutcome>[0]>) {
+const openDatabase = (databasePath?: string) =>
+  openOpenClawAgentDatabase({ ...target, path: databasePath });
+const readRows = (db: DatabaseSync, columns = "run_id") =>
+  db.prepare(`SELECT ${columns} FROM message_tool_run_outcomes ORDER BY id`).all();
+const readFirst = (db: DatabaseSync, query: string) => db.prepare(query).get();
+type Outcome = Parameters<typeof recordMessageToolRunOutcome>[0];
+
+function outcomeInput(runId: string, overrides: Partial<Outcome> = {}) {
   return {
-    runId: "worker-boundary",
+    ...target,
     sessionKey: "agent:main:main",
-    agentId: "main",
     provider: "openai",
     model: "gpt-5.6-luna",
     outcome: "mute" as const,
     runStatus: "completed" as const,
     occurredAt: 100,
     ...overrides,
+    runId,
   };
 }
 
-const recordOutcome = (overrides: Parameters<typeof outcomeInput>[0]) =>
-  recordMessageToolRunOutcome(outcomeInput(overrides));
+const recordOutcome = (runId: string, overrides?: Parameters<typeof outcomeInput>[1]) =>
+  recordMessageToolRunOutcome(outcomeInput(runId, overrides));
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -62,9 +72,8 @@ describe("message-tool run outcome store", () => {
   it.each([false, true])(
     "records durable outcomes without caller-thread SQL (custom=%s)",
     async (custom) => {
-      const env = createEnv();
       const storePath = custom ? path.join(env.OPENCLAW_STATE_DIR!, "custom.sqlite") : undefined;
-      const database = openOpenClawAgentDatabase({ agentId: "main", env, path: storePath });
+      const database = openDatabase(storePath);
       const prepare = vi.spyOn(DatabaseSync.prototype, "prepare").mockImplementation(() => {
         throw new Error("SQL ran on the caller");
       });
@@ -72,25 +81,17 @@ describe("message-tool run outcome store", () => {
         throw new Error("SQL ran on the caller");
       });
       try {
-        await recordOutcome({
-          runId: "worker-boundary",
-          outcome: "tool_delivered",
-          storePath,
-          env,
-        });
+        await recordOutcome("worker-boundary", { outcome: "tool_delivered", storePath });
       } finally {
         prepare.mockRestore();
         exec.mockRestore();
       }
-      expect(database.db.prepare("SELECT run_id FROM message_tool_run_outcomes").all()).toEqual([
-        { run_id: "worker-boundary" },
-      ]);
+      expect(readRows(database.db)).toEqual([{ run_id: "worker-boundary" }]);
     },
   );
 
   it("lazily records typed completion facts in an existing same-version database", async () => {
-    const env = createEnv();
-    const database = openOpenClawAgentDatabase({ agentId: "main", env });
+    const database = openDatabase();
     database.db.exec("DROP TABLE message_tool_run_outcomes;");
     closeOpenClawAgentDatabasesForTest();
 
@@ -99,32 +100,20 @@ describe("message-tool run outcome store", () => {
       ["run-mute", "mute", "completed"],
       ["run-error", "mute", "errored"],
     ] as const) {
-      await recordOutcome({
-        runId,
-        outcome,
-        runStatus,
-        env,
-      });
+      await recordOutcome(runId, { outcome, runStatus });
     }
 
     outcomeFault.enable();
     try {
-      await expect(
-        recordOutcome({
-          runId: "refused",
-          runStatus: "errored",
-          env,
-        }),
-      ).rejects.toMatchObject({ code: "ERR_SQLITE_ERROR", errcode: 1811 });
+      await expect(recordOutcome("refused", { runStatus: "errored" })).rejects.toMatchObject({
+        code: "ERR_SQLITE_ERROR",
+        errcode: 1811,
+      });
     } finally {
       outcomeFault.disable();
     }
 
-    expect(
-      openOpenClawAgentDatabase({ agentId: "main", env })
-        .db.prepare("SELECT run_id, outcome, run_status FROM message_tool_run_outcomes ORDER BY id")
-        .all(),
-    ).toEqual([
+    expect(readRows(openDatabase().db, "run_id, outcome, run_status")).toEqual([
       { run_id: "run-delivered", outcome: "tool_delivered", run_status: "completed" },
       { run_id: "run-mute", outcome: "mute", run_status: "completed" },
       { run_id: "run-error", outcome: "mute", run_status: "errored" },
@@ -132,8 +121,7 @@ describe("message-tool run outcome store", () => {
   });
 
   it("prunes the per-agent operational history to 10,000 newest rows", async () => {
-    const env = createEnv();
-    const database = openOpenClawAgentDatabase({ agentId: "main", env });
+    const database = openDatabase();
     database.db.exec(`
       WITH RECURSIVE rows(value) AS (
         SELECT 1
@@ -149,67 +137,47 @@ describe("message-tool run outcome store", () => {
       FROM rows;
     `);
 
-    await recordOutcome({
-      runId: "newest",
-      outcome: "tool_delivered",
-      occurredAt: 20_000,
-      env,
-    });
+    await recordOutcome("newest", { outcome: "tool_delivered", occurredAt: 20_000 });
 
     expect(
-      database.db
-        .prepare(
-          "SELECT COUNT(*) AS count, MIN(occurred_at) AS oldest, MAX(occurred_at) AS newest FROM message_tool_run_outcomes",
-        )
-        .get(),
+      readFirst(
+        database.db,
+        "SELECT COUNT(*) AS count, MIN(occurred_at) AS oldest, MAX(occurred_at) AS newest FROM message_tool_run_outcomes",
+      ),
     ).toEqual({ count: 10_000, oldest: 1, newest: 20_000 });
     expect(
-      database.db
-        .prepare("SELECT run_id FROM message_tool_run_outcomes ORDER BY occurred_at, id LIMIT 1")
-        .get(),
+      readFirst(
+        database.db,
+        "SELECT run_id FROM message_tool_run_outcomes ORDER BY occurred_at, id LIMIT 1",
+      ),
     ).toEqual({ run_id: "seed-3" });
   });
 
   it("preserves FIFO against other agent writes and captures queued inputs", async () => {
-    const env = createEnv();
-    const target = { agentId: "main", env };
-    const db = openOpenClawAgentDatabase(target).db;
+    const db = openDatabase().db;
     const gate = createDeferredCore();
     const ahead = runOpenClawAgentWriteAdmission(target, () => gate.promise);
-    const input = outcomeInput({
-      ...target,
-      runId: "first",
-    });
+    const input = outcomeInput("first");
     const first = recordMessageToolRunOutcome(input);
-    const between = runOpenClawAgentWriteAdmission(target, () =>
-      db.prepare("SELECT run_id FROM message_tool_run_outcomes ORDER BY id").all(),
-    );
-    const second = recordOutcome({ ...input, runId: "second" });
+    const between = runOpenClawAgentWriteAdmission(target, () => readRows(db));
+    const second = recordOutcome("second", { ...input });
     input.runId = "mutated";
     input.sessionKey = "agent:main:changed";
     env.OPENCLAW_STATE_DIR = tempDirs.make("openclaw-message-tool-unselected-");
     gate.resolve();
     await Promise.all([ahead, first, second]);
     expect(await between).toEqual([{ run_id: "first" }]);
-    expect(
-      db.prepare("SELECT run_id, session_key FROM message_tool_run_outcomes ORDER BY id").all(),
-    ).toEqual([
+    expect(readRows(db, "run_id, session_key")).toEqual([
       { run_id: "first", session_key: "agent:main:main" },
       { run_id: "second", session_key: "agent:main:main" },
     ]);
   });
 
   it("refuses queued recording after close instead of opening a successor", async () => {
-    const env = createEnv();
-    const target = { agentId: "main", env };
-    openOpenClawAgentDatabase(target);
+    openDatabase();
     const gate = createDeferredCore();
     const ahead = runOpenClawAgentWriteAdmission(target, () => gate.promise);
-    const pending = recordOutcome({
-      ...target,
-      runId: "closed",
-      runStatus: "aborted",
-    });
+    const pending = recordOutcome("closed", { runStatus: "aborted" });
     const refused = expect(pending).rejects.toThrow(/revoked|closed/);
     try {
       await closeOpenClawAgentDatabasesAsync();
@@ -222,12 +190,8 @@ describe("message-tool run outcome store", () => {
   });
 
   it("does not recreate an absent incognito session for late outcome metadata", async () => {
-    const env = createEnv();
-    const target = { agentId: "main", env };
     await expect(
-      recordOutcome({
-        ...target,
-        runId: "private",
+      recordOutcome("private", {
         sessionKey: "agent:main:dashboard:incognito-outcome",
         runStatus: "aborted",
       }),

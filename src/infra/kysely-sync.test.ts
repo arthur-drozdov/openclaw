@@ -1,4 +1,3 @@
-// Covers the compile-only Kysely facade used by sync node:sqlite helpers.
 import { spawnSync } from "node:child_process";
 import { constants, DatabaseSync, StatementSync } from "node:sqlite";
 import { sql, type ColumnType, type Kysely, type Compilable } from "kysely";
@@ -29,11 +28,36 @@ type SyncHelperTestDatabase = {
     name: string;
   };
 };
+type Item = { id: number; name: string };
+type RetentionResult = {
+  databaseCollected: boolean;
+  statementsCollected: number;
+  statementCount: number;
+};
 
 describe("kysely sync helpers", () => {
   let database: DatabaseSync;
   let db: Kysely<SyncHelperTestDatabase>;
 
+  const run = <Row>(query: Compilable<Row>) => executeSqliteQuerySync(database, query);
+  const first = <Row>(query: Compilable<Row>) => executeSqliteQueryTakeFirstSync(database, query);
+  const selectItems = () => db.selectFrom("items").selectAll();
+  function createItems(names: string[] = [], connection = database, constraint = "") {
+    connection.exec(
+      `create table items (id integer primary key, name text not null ${constraint})`,
+    );
+    names.forEach((name, index) => {
+      connection.prepare("insert into items values (?, ?)").run(index + 1, name);
+    });
+  }
+  function trackVisits() {
+    const visited: number[] = [];
+    database.function("visit", (id) => {
+      visited.push(Number(id));
+      return id;
+    });
+    return visited;
+  }
   function expectRows<Row>(
     query: Compilable<Row>,
     rows: unknown,
@@ -43,6 +67,31 @@ describe("kysely sync helpers", () => {
     for (let attempt = 0; attempt < times; attempt++) {
       expect(executeSqliteQuerySync(connection, query).rows).toEqual(rows);
     }
+  }
+  function cachedRows(connection = database) {
+    const prepares = countPrepares(connection);
+    const query = getNodeSqliteKysely<SyncHelperTestDatabase>(connection)
+      .selectFrom("items")
+      .selectAll();
+    return (rows: unknown, calls: number, times = 1) => {
+      expectRows(query, rows, times, connection);
+      expect(prepares.calls()).toBe(calls);
+    };
+  }
+  function variableSelect(parameterCount: number) {
+    return selectItems().where(
+      "id",
+      "not in",
+      Array.from({ length: parameterCount }, (_, index) => index + 1),
+    );
+  }
+  function prepare<Params, Row>(
+    mode: string,
+    build: Parameters<typeof prepareSqliteQuerySync<Params, Row>>[1],
+  ) {
+    return mode === "first"
+      ? prepareSqliteQueryTakeFirstSync(database, build)
+      : prepareSqliteQuerySync(database, build);
   }
 
   beforeEach(() => {
@@ -56,59 +105,49 @@ describe("kysely sync helpers", () => {
   });
 
   it("stops first-row selects without evaluating later rows and releases the reader", () => {
-    database.exec(
-      "create table items (id integer primary key, name text not null); insert into items values (1, 'Ada'), (2, 'Grace'), (3, 'Lin')",
-    );
+    createItems(["Ada", "Grace", "Lin"]);
     enableNodeSqliteKyselyStatementCache(database);
 
-    const visited: number[] = [];
-    database.function("visit", (id) => {
-      visited.push(Number(id));
-      return id;
-    });
+    const visited = trackVisits();
     const select = db.selectFrom("items").select(db.fn<number>("visit", ["id"]).as("id"));
     for (let attempt = 0; attempt < 3; attempt++) {
       visited.length = 0;
-      expect(executeSqliteQueryTakeFirstSync(database, select)).toEqual({ id: 1 });
+      expect(first(select)).toEqual({ id: 1 });
       expect(visited).toEqual([1]);
     }
     database.exec("drop table items");
-    database.exec("create table items (id integer primary key, name text not null)");
-    expect(executeSqliteQueryTakeFirstSync(database, select)).toBeUndefined();
+    createItems();
+    expect(first(select)).toBeUndefined();
   });
 
   it("retains 64-bit insert identities without breaking later writes or numeric reads", () => {
-    database.exec("create table items (id integer primary key, name text not null)");
+    createItems();
     enableNodeSqliteKyselyStatementCache(database);
 
     const id = 9007199254740993n;
-    const inserted = executeSqliteQuerySync(
-      database,
-      db.insertInto("items").values({ id, name: "original" }),
-    );
-    expect(inserted).toEqual({ insertId: id, numAffectedRows: 1n, rows: [] });
+    expect(run(db.insertInto("items").values({ id, name: "original" }))).toEqual({
+      insertId: id,
+      numAffectedRows: 1n,
+      rows: [],
+    });
     for (const name of ["first", "second", "third"]) {
-      expect(executeSqliteQuerySync(database, db.updateTable("items").set({ name }))).toEqual({
+      expect(run(db.updateTable("items").set({ name }))).toEqual({
         numAffectedRows: 1n,
         rows: [],
       });
       expect(
-        executeSqliteQueryTakeFirstSync(
-          database,
-          db.selectFrom("items").select((eb) => eb.fn.countAll<number>().as("count")),
-        ),
+        first(db.selectFrom("items").select((eb) => eb.fn.countAll<number>().as("count"))),
       ).toEqual({ count: 1 });
     }
-    expect(executeSqliteQuerySync(database, db.deleteFrom("items"))).toEqual({
+    expect(run(db.deleteFrom("items"))).toEqual({
       numAffectedRows: 1n,
       rows: [],
     });
   });
 
   it("preserves raw readers and distinguishes writes with and without returned rows", () => {
-    database.exec(
-      "create table items (id integer primary key, name text not null); insert into items (id, name) values (1, 'Ada'); pragma user_version = 42",
-    );
+    createItems(["Ada"]);
+    database.exec("pragma user_version = 42");
 
     const pragma = { compile: () => sql`pragma user_version`.compile(db) };
 
@@ -120,19 +159,15 @@ describe("kysely sync helpers", () => {
 
     const update = db.updateTable("items").set({ name: "Grace" }).where("id", "=", 1);
     expect([...iterateSqliteQuerySync(database, update)]).toEqual([]);
-    expect(executeSqliteQueryTakeFirstSync(database, db.selectFrom("items").selectAll())).toEqual({
+    expect(first(selectItems())).toEqual({
       id: 1,
       name: "Ada",
     });
-    expect(executeSqliteQuerySync(database, update)).toEqual({ rows: [], numAffectedRows: 1n });
+    expect(run(update)).toEqual({ rows: [], numAffectedRows: 1n });
     expect([...iterateSqliteQuerySync(database, update.returningAll())]).toEqual([
       { id: 1, name: "Grace" },
     ]);
-    const visited: number[] = [];
-    database.function("visit", (id) => {
-      visited.push(Number(id));
-      return id;
-    });
+    const visited = trackVisits();
     database.exec("insert into items (id, name) values (2, 'Lin')");
     const rawRows = {
       // Raw readers share the completion path with writes; selecting a first result must drain them.
@@ -170,7 +205,7 @@ describe("kysely sync helpers", () => {
     "preserves string binding and set semantics (%s)",
     (encoding) => {
       database.exec(`PRAGMA encoding = '${encoding}'`);
-      database.exec("create table items (id integer primary key, name text not null unique)");
+      createItems([], database, "unique");
       const values = [
         "",
         "plain",
@@ -186,7 +221,7 @@ describe("kysely sync helpers", () => {
         "'); DROP TABLE items; --",
       ];
       for (const name of values) {
-        executeSqliteQuerySync(database, db.insertInto("items").values({ name }));
+        run(db.insertInto("items").values({ name }));
       }
       for (const names of [
         [],
@@ -197,10 +232,10 @@ describe("kysely sync helpers", () => {
         ["\uDC00"],
         ["absent"],
       ]) {
-        const query = db.selectFrom("items").selectAll().orderBy("name");
+        const query = selectItems().orderBy("name");
         expectRows(
           query.where("name", "in", sqliteStringSet(names)),
-          executeSqliteQuerySync(database, query.where("name", "in", names)).rows,
+          run(query.where("name", "in", names)).rows,
         );
       }
     },
@@ -243,28 +278,21 @@ describe("kysely sync helpers", () => {
   );
 
   it.each(["eager", "first"])("completes prepared writes returning rows (%s)", (mode) => {
-    database.exec(
-      "create table items (id integer primary key, name text not null); insert into items values (1, 'Ada'), (2, 'Grace')",
-    );
+    createItems(["Ada", "Grace"]);
 
-    const build: Parameters<
-      typeof prepareSqliteQuerySync<string, { id: number; name: string }>
-    >[1] = (parameter) =>
+    const build: Parameters<typeof prepareSqliteQuerySync<string, Item>>[1] = (parameter) =>
       db
         .updateTable("items")
         .set({ name: parameter((name) => name) })
         .returningAll();
-    const update =
-      mode === "first"
-        ? prepareSqliteQueryTakeFirstSync(database, build)
-        : prepareSqliteQuerySync(database, build);
+    const update = prepare(mode, build);
     for (const name of ["Lin", "Katherine"]) {
       const rows = [
         { id: 1, name },
         { id: 2, name },
       ];
       expect(update(name)).toEqual(mode === "first" ? rows[0] : { rows });
-      expectRows(db.selectFrom("items").selectAll().orderBy("id"), rows);
+      expectRows(selectItems().orderBy("id"), rows);
     }
   });
 
@@ -283,10 +311,7 @@ describe("kysely sync helpers", () => {
           return value;
         }).as("value"),
       );
-    const read =
-      mode === "first"
-        ? prepareSqliteQueryTakeFirstSync(database, build)
-        : prepareSqliteQuerySync(database, build);
+    const read = prepare(mode, build);
     expect(captureError(() => read("reject"))).toBe(failure);
     expect(observed).toEqual([]);
     expect(read("accepted")).toEqual(
@@ -294,53 +319,29 @@ describe("kysely sync helpers", () => {
     );
   });
 
-  it("admits only repeated SQL and bounds the prepared statement working set", () => {
-    database.exec("create table items (id integer primary key, name text not null)");
-
+  it.each(["repeated SQL", "one-shot SQL"])("bounds the statement cache for %s", (mode) => {
+    const passes: [number, number, number, number | null][] =
+      mode === "repeated SQL"
+        ? [
+            [1, 128, 2, 256],
+            [65, 128, 1, 256],
+            [1, 64, 1, 320],
+          ]
+        : [
+            [1, 128, 1, null],
+            [1, 128, 1, null],
+            [1, 128, 1, 384],
+          ];
+    createItems();
     const prepares = countPrepares(database);
-    const variableSelect = (parameterCount: number) =>
-      db
-        .selectFrom("items")
-        .selectAll()
-        .where(
-          "id",
-          "not in",
-          Array.from({ length: parameterCount }, (_, index) => index + 1),
-        );
-
-    for (let parameterCount = 1; parameterCount <= 128; parameterCount += 1) {
-      expectRows(variableSelect(parameterCount), []);
-      expectRows(variableSelect(parameterCount), []);
-    }
-    expect(prepares.calls()).toBe(256);
-
-    for (let parameterCount = 65; parameterCount <= 128; parameterCount += 1) {
-      expectRows(variableSelect(parameterCount), []);
-    }
-    expect(prepares.calls()).toBe(256);
-
-    for (let parameterCount = 1; parameterCount <= 64; parameterCount += 1) {
-      expectRows(variableSelect(parameterCount), []);
-    }
-    expect(prepares.calls()).toBe(320);
-  });
-
-  it("does not retain one-shot variable-cardinality SQL statements", () => {
-    database.exec("create table items (id integer primary key, name text not null)");
-
-    const prepares = countPrepares(database);
-    const runVariableSelects = () => {
-      for (let parameterCount = 1; parameterCount <= 128; parameterCount += 1) {
-        const ids = Array.from({ length: parameterCount }, (_, index) => index + 1);
-        const select = db.selectFrom("items").selectAll().where("id", "not in", ids);
-        expectRows(select, []);
+    for (const [from, to, repeats, expected] of passes) {
+      for (let count = from; count <= to; count++) {
+        expectRows(variableSelect(count), [], repeats);
       }
-    };
-
-    runVariableSelects();
-    runVariableSelects();
-    runVariableSelects();
-    expect(prepares.calls()).toBe(384);
+      if (expected !== null) {
+        expect(prepares.calls()).toBe(expected);
+      }
+    }
   });
 
   it("keeps nested prepared lazy iterations independent", () => {
@@ -351,15 +352,13 @@ describe("kysely sync helpers", () => {
     for (const name of ["Ada", "Grace", "Lin"]) {
       executeSqliteQuerySync(database, db.insertInto("items").values({ name }));
     }
-    const select = db.selectFrom("items").selectAll().orderBy("id");
-    const read = prepareSqliteQueryIterator<{ from: number }, { id: number; name: string }>(
-      database,
-      (parameter) =>
-        select.where(
-          "id",
-          ">=",
-          parameter((input) => input.from),
-        ),
+    const select = selectItems().orderBy("id");
+    const read = prepareSqliteQueryIterator<{ from: number }, Item>(database, (parameter) =>
+      select.where(
+        "id",
+        ">=",
+        parameter((input) => input.from),
+      ),
     );
     const prepares = countPrepares(database);
 
@@ -384,13 +383,11 @@ describe("kysely sync helpers", () => {
   });
 
   it("attributes active lazy readers and releases them after early return", () => {
-    database.exec(
-      "create table items (id integer primary key, name text not null); insert into items values (1, 'Ada'), (2, 'Grace')",
-    );
+    createItems(["Ada", "Grace"]);
 
     const iterator = withSqliteReaderOwner(
       { operation: "fixture.rows", ownerKind: "worker", actorId: 7 },
-      () => iterateSqliteQuerySync(database, db.selectFrom("items").selectAll().orderBy("id")),
+      () => iterateSqliteQuerySync(database, selectItems().orderBy("id")),
     );
 
     expect(iterator.next()).toEqual({ done: false, value: { id: 1, name: "Ada" } });
@@ -406,34 +403,27 @@ describe("kysely sync helpers", () => {
     if (typeof database.setAuthorizer !== "function") {
       return;
     }
-    database.exec("create table items (id integer primary key, name text not null)");
-    database.exec("insert into items (id, name) values (1, 'Ada')");
-    const select = db.selectFrom("items").selectAll();
-    const prepares = countPrepares(database);
-
-    expectRows(select, [{ id: 1, name: "Ada" }], 3);
-    expect(prepares.calls()).toBe(2);
+    createItems(["Ada"]);
+    const checkRows = cachedRows();
+    checkRows([{ id: 1, name: "Ada" }], 2, 3);
 
     database.setAuthorizer((actionCode, tableName) =>
       actionCode === constants.SQLITE_READ && tableName === "items"
         ? constants.SQLITE_IGNORE
         : constants.SQLITE_OK,
     );
-    expectRows(select, [{ id: null, name: null }], 3);
-    expect(prepares.calls()).toBe(5);
+    checkRows([{ id: null, name: null }], 5, 3);
 
     database.setAuthorizer(null);
-    expectRows(select, [{ id: 1, name: "Ada" }]);
-    expect(prepares.calls()).toBe(6);
+    checkRows([{ id: 1, name: "Ada" }], 6);
   });
 
   it("does not cache while a dynamic SQLite authorizer is installed", () => {
     if (typeof database.setAuthorizer !== "function") {
       return;
     }
-    database.exec("create table items (id integer primary key, name text not null)");
-    database.exec("insert into items (id, name) values (1, 'Ada')");
-    const select = db.selectFrom("items").selectAll();
+    createItems(["Ada"]);
+    const select = selectItems();
     const prepares = countPrepares(database);
     let allow = true;
     database.setAuthorizer(() => (allow ? constants.SQLITE_OK : constants.SQLITE_DENY));
@@ -467,18 +457,16 @@ describe("kysely sync helpers", () => {
         `1 /*${"x".repeat(64 * 1024)}*/`,
       );
     const oversizedSql = db.selectNoFrom(oversizedExpression.as("value"));
-    expectRows(oversizedSql, [{ value: 1 }]);
-    expectRows(oversizedSql, [{ value: 1 }]);
+    expectRows(oversizedSql, [{ value: 1 }], 2);
     expect(prepares.calls()).toBe(6);
   });
 
   it("invalidates prepared statements when the database is deserialized", () => {
-    database.exec("create table items (id integer primary key, name text not null)");
-    database.exec("insert into items (id, name) values (1, 'Ada')");
+    createItems(["Ada"]);
     let replacementBytes = new Uint8Array();
     if (typeof database.deserialize === "function") {
       const replacement = new DatabaseSync(":memory:");
-      replacement.exec("create table items (id integer primary key, name text not null)");
+      createItems([], replacement);
       replacement.exec("insert into items (id, name) values (2, 'Grace')");
       replacementBytes = replacement.serialize();
       replacement.close();
@@ -491,28 +479,18 @@ describe("kysely sync helpers", () => {
         },
       });
     }
-    const select = db.selectFrom("items").selectAll();
-    const prepares = countPrepares(database);
-
-    expectRows(select, [{ id: 1, name: "Ada" }], 3);
-    expect(prepares.calls()).toBe(2);
-
+    const checkRows = cachedRows();
+    checkRows([{ id: 1, name: "Ada" }], 2, 3);
     database.deserialize(replacementBytes);
-
-    expectRows(select, [{ id: 2, name: "Grace" }]);
-    expect(prepares.calls()).toBe(3);
+    checkRows([{ id: 2, name: "Grace" }], 3);
   });
 
   it.each(["eager", "first"])("reads current columns without allocating metadata (%s)", (mode) => {
-    database.exec("create table items (id integer primary key, name text not null)");
-    database.exec("insert into items (id, name) values (1, 'Ada')");
-    const select = db.selectFrom("items").selectAll();
+    createItems(["Ada"]);
+    const select = selectItems();
     const prepares = countPrepares(database);
     const columns = vi.spyOn(StatementSync.prototype, "columns");
-    const read = () =>
-      mode === "eager"
-        ? executeSqliteQuerySync(database, select).rows
-        : [executeSqliteQueryTakeFirstSync(database, select)];
+    const read = () => (mode === "eager" ? run(select).rows : [first(select)]);
     try {
       for (let attempt = 0; attempt < 3; attempt++) {
         expect(read()).toEqual([{ id: 1, name: "Ada" }]);
@@ -537,7 +515,7 @@ describe("kysely sync helpers", () => {
     expectRows(jsonValue("{}"), [{ value: "{}" }], 3);
     expect(prepares.calls()).toBe(2);
 
-    expect(() => executeSqliteQuerySync(database, jsonValue("{"))).toThrow(/malformed JSON/iu);
+    expect(() => run(jsonValue("{"))).toThrow(/malformed JSON/iu);
     expectRows(jsonValue("[]"), [{ value: "[]" }]);
     expect(prepares.calls()).toBe(2);
   });
@@ -556,7 +534,7 @@ describe("kysely sync helpers", () => {
 
       const thrown = captureError(() => {
         if (mode === "eager") {
-          executeSqliteQuerySync(database, malformedJson);
+          run(malformedJson);
         } else {
           Array.from(iterateSqliteQuerySync(database, malformedJson));
         }
@@ -570,8 +548,7 @@ describe("kysely sync helpers", () => {
 
   it("clears cached statements before propagating a close failure", () => {
     const cached = new DatabaseSync(":memory:");
-    cached.exec("create table items (id integer primary key, name text not null)");
-    cached.exec("insert into items (id, name) values (1, 'Ada')");
+    createItems(["Ada"], cached);
     const closeError = new Error("synthetic close failure");
     Object.defineProperty(cached, "close", {
       configurable: true,
@@ -580,17 +557,11 @@ describe("kysely sync helpers", () => {
         throw closeError;
       },
     });
-    const cachedDb = getNodeSqliteKysely<SyncHelperTestDatabase>(cached);
-    const select = cachedDb.selectFrom("items").selectAll();
-    const prepares = countPrepares(cached);
-
+    const checkRows = cachedRows(cached);
     try {
-      expectRows(select, [{ id: 1, name: "Ada" }], 3, cached);
-      expect(prepares.calls()).toBe(2);
-
+      checkRows([{ id: 1, name: "Ada" }], 2, 3);
       expect(() => cached.close()).toThrow(closeError);
-      expectRows(select, [{ id: 1, name: "Ada" }], 1, cached);
-      expect(prepares.calls()).toBe(3);
+      checkRows([{ id: 1, name: "Ada" }], 3);
     } finally {
       clearNodeSqliteKyselyCacheForDatabase(cached);
       delete (cached as { close?: DatabaseSync["close"] }).close;
@@ -625,13 +596,13 @@ describe("kysely sync helpers", () => {
   );
 
   it("keeps the builder facade compile-only and fails direct execution", async () => {
-    database.exec("create table items (id integer primary key, name text not null)");
+    createItems();
 
-    executeSqliteQuerySync(database, db.insertInto("items").values({ id: 1, name: "Ada" }));
-    expectRows(db.selectFrom("items").selectAll(), [{ id: 1, name: "Ada" }]);
+    run(db.insertInto("items").values({ id: 1, name: "Ada" }));
+    expectRows(selectItems(), [{ id: 1, name: "Ada" }]);
 
     const compileOnlyError = /compile-only Kysely facade/;
-    await expect(db.selectFrom("items").selectAll().execute()).rejects.toThrow(compileOnlyError);
+    await expect(selectItems().execute()).rejects.toThrow(compileOnlyError);
     await expect(db.insertInto("items").values({ id: 2, name: "Grace" }).execute()).rejects.toThrow(
       compileOnlyError,
     );
@@ -641,8 +612,8 @@ describe("kysely sync helpers", () => {
       }),
     ).rejects.toThrow(compileOnlyError);
     await expectCompileOnlyRejection(db.startTransaction().execute());
-    await expectCompileOnlyRejection(consumeStream(db.selectFrom("items").selectAll().stream()));
-    await expectCompileOnlyRejection(db.selectFrom("items").selectAll().execute());
+    await expectCompileOnlyRejection(consumeStream(selectItems().stream()));
+    await expectCompileOnlyRejection(selectItems().execute());
 
     expectRows(db.selectFrom("items").select(["id", "name"]), [{ id: 1, name: "Ada" }]);
   });
@@ -670,11 +641,7 @@ function captureError(operation: () => void): unknown {
 
 function runRetentionScenario(options: {
   cleanup: "clear-and-close" | "close" | "dispose" | "drop";
-}): {
-  databaseCollected: boolean;
-  statementsCollected: number;
-  statementCount: number;
-} {
+}): RetentionResult {
   const moduleUrl = resolveRuntimeWorkerUrl(storageProcessTestEntrypoints.kyselySync);
   const cleanup = {
     "clear-and-close": `
@@ -743,13 +710,8 @@ function runRetentionScenario(options: {
     { cwd: process.cwd(), encoding: "utf8", timeout: 20_000 },
   );
 
-  expect(result.stderr).toBe("");
-  expect(result.status).toBe(0);
-  return JSON.parse(result.stdout) as {
-    databaseCollected: boolean;
-    statementsCollected: number;
-    statementCount: number;
-  };
+  expect(result).toMatchObject({ stderr: "", status: 0 });
+  return JSON.parse(result.stdout) as RetentionResult;
 }
 
 async function expectCompileOnlyRejection(promise: Promise<unknown>): Promise<void> {
