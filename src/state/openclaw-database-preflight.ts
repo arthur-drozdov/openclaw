@@ -117,17 +117,23 @@ export async function assertOpenClawDatabasesReady(
         ? { requireStartupMigrationReadiness: true }
         : {}),
       ...(options.operation === "doctor"
-        ? { configuredAgentDatabaseTargets: options.configuredAgentDatabaseTargets }
+        ? {
+            configuredAgentDatabaseTargets: options.configuredAgentDatabaseTargets,
+            inspectHeldAgentDatabaseTargets: options.configuredAgentDatabaseTargets.filter(
+              (target) =>
+                !options.config || !canIsolateAgentDatabase(options.config, target.agentId),
+            ),
+          }
         : {}),
     },
-    "runtime",
+    options.operation === "doctor" ? "maintenance" : "runtime",
   );
   const failures: unknown[] = [];
   for (const refusal of schemas.agentRefusals ?? []) {
     if (
       !options.config ||
       ((refusal.code === "agent-database-ownership-mismatch" ||
-        ((options.operation === "gateway-startup" || options.operation === "doctor") &&
+        (options.operation === "gateway-startup" &&
           refusal.code !== "agent-database-inspection-pending")) &&
         !canIsolateAgentDatabase(options.config, refusal.agentId))
     ) {

@@ -26,10 +26,15 @@ it.each([
   "lost-empty-wal",
   "lost-empty-sequence",
   "recorded-empty",
-] as const)("requires a usable main agent after schema-26 repair (%s)", async (scenario) => {
+  "recorded-secondary",
+] as const)("verifies required agents after schema-26 repair (%s)", async (scenario) => {
   await withOpenClawTestState({ scenario: "empty" }, async (state) => {
+    const agentId = scenario === "recorded-secondary" ? "worker" : "main";
     const cfg: OpenClawConfig = {
-      agents: { entries: { main: {} } },
+      agents: {
+        entries: { main: {}, ...(agentId === "worker" ? { worker: {} } : {}) },
+        defaults: { systemAgent: { agentId: "main" } },
+      },
       plugins: { enabled: false },
     };
     await state.writeConfig(cfg);
@@ -38,7 +43,7 @@ it.each([
       shared.db.exec("DROP TABLE agent_deletion_journal");
     }
     await closeOpenClawStateDatabaseByPathAsync(resolveOpenClawStateSqlitePath(state.env));
-    const pathname = path.join(state.agentDir("main"), "openclaw-agent.sqlite");
+    const pathname = path.join(state.agentDir(agentId), "openclaw-agent.sqlite");
     fs.mkdirSync(path.dirname(pathname), { recursive: true });
     const transcript = JSON.stringify({
       type: "message",
@@ -59,8 +64,8 @@ it.each([
     );
     seed.exec(`PRAGMA user_version = 26;
       INSERT INTO schema_meta (meta_key, role, schema_version, agent_id, created_at, updated_at)
-      VALUES ('primary', 'agent', 26, 'main', 1, 1);`);
-    const empty = scenario.startsWith("lost-empty") || scenario === "recorded-empty";
+      VALUES ('primary', 'agent', 26, '${agentId}', 1, 1);`);
+    const empty = scenario.startsWith("lost-empty") || scenario.startsWith("recorded-");
     if (!empty) {
       seed.exec(`
       INSERT INTO session_nodes (session_key, current_session_id, entry_json, updated_at)
@@ -91,10 +96,10 @@ it.each([
         `);
     }
     seed.close();
-    if (scenario === "recorded-empty") {
+    if (scenario.startsWith("recorded-")) {
       runOpenClawStateWriteTransaction(
         (database) => {
-          recordAgentDeletionRecoveryHolds(database, [{ agentId: "main", path: pathname }]);
+          recordAgentDeletionRecoveryHolds(database, [{ agentId, path: pathname }]);
         },
         { env: state.env },
       );
@@ -112,6 +117,11 @@ it.each([
       preparedDiscovery: next.agentDatabaseMigrationDiscovery,
     });
     const ready = assertDoctorMaintenanceReady(cfg, state.env, () => {});
+    if (scenario === "recorded-secondary") {
+      await expect(ready).resolves.toEqual({ schemaPublicationDeferred: false });
+      expect(fs.readFileSync(pathname)).toEqual(before);
+      return;
+    }
     if (
       scenario === "lost-with-history" ||
       scenario === "lost-empty-sequence" ||
