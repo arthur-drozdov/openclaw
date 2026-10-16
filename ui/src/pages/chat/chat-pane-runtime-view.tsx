@@ -63,8 +63,8 @@ function MountedChatPaneRuntime(props: { runtime: ChatPaneRuntime }) {
   });
   const sources = [runtime.context.plugins, runtime.context.navigation].map((source) =>
     projectSource(source, {
-      read: (owner) => owner,
-      subscribe: (owner, notify) => owner?.subscribe(notify) ?? (() => {}),
+      read: (capability) => capability,
+      subscribe: (capability, notify) => capability?.subscribe(notify) ?? (() => {}),
       equality: "revision",
     }),
   );
