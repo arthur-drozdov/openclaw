@@ -17,7 +17,7 @@ extension GatewayNodeSession {
 
         // Keep the wrapper detached: this nonthrowing API historically lets the invoke/timeout
         // race settle even when its caller is cancelled.
-        return await Task.detached {
+        let response = await Task.detached {
             await (try? AsyncTimeout.withTimeoutMs(
                 timeoutMs: timeout,
                 onTimeout: {
@@ -35,5 +35,8 @@ extension GatewayNodeSession {
                     code: .unavailable,
                     message: "node invoke timed out"))
         }.value
+        timeoutLogger
+            .info("node invoke race resolved id=\(request.id, privacy: .public) ok=\(response.ok, privacy: .public)")
+        return response
     }
 }

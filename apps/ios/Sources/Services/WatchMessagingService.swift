@@ -62,10 +62,16 @@ final class WatchMessagingService: @preconcurrency WatchMessagingServicing {
         self.statusHandler = handler
         guard let handler else {
             self.lastEmittedStatus = nil
+            GatewayDiagnostics.log("watch messaging: cleared status handler")
             return
         }
         let snapshot = self.transport.currentStatusSnapshot()
         self.lastEmittedStatus = snapshot
+        GatewayDiagnostics.log(
+            "watch messaging: set status handler "
+                + "supported=\(snapshot.supported) paired=\(snapshot.paired) "
+                + "appInstalled=\(snapshot.appInstalled) reachable=\(snapshot.reachable) "
+                + "activation=\(snapshot.activationState)")
         handler(snapshot)
     }
 
@@ -170,6 +176,11 @@ final class WatchMessagingService: @preconcurrency WatchMessagingServicing {
             return
         }
         self.lastEmittedStatus = snapshot
+        GatewayDiagnostics.log(
+            "watch messaging: status "
+                + "supported=\(snapshot.supported) paired=\(snapshot.paired) "
+                + "appInstalled=\(snapshot.appInstalled) reachable=\(snapshot.reachable) "
+                + "activation=\(snapshot.activationState)")
         self.statusHandler?(snapshot)
     }
 
@@ -193,10 +204,22 @@ final class WatchMessagingService: @preconcurrency WatchMessagingServicing {
         case let .execApprovalResolve(event):
             self.execApprovalResolveHandler?(event)
         case let .execApprovalSnapshotRequest(event):
+            GatewayDiagnostics.log(
+                "watch messaging: snapshot request "
+                    + "id=\(event.requestId) transport=\(event.transport) "
+                    + "sentAtMs=\(event.sentAtMs ?? -1)")
             self.execApprovalSnapshotRequestHandler?(event)
         case let .appSnapshotRequest(event):
+            GatewayDiagnostics.log(
+                "watch messaging: app snapshot request "
+                    + "id=\(event.requestId) transport=\(event.transport) "
+                    + "sentAtMs=\(event.sentAtMs ?? -1)")
             self.appSnapshotRequestHandler?(event)
         case let .appCommand(event):
+            GatewayDiagnostics.log(
+                "watch messaging: app command "
+                    + "id=\(event.commandId) command=\(event.command.rawValue) "
+                    + "transport=\(event.transport)")
             self.appCommandHandler?(event)
         }
     }

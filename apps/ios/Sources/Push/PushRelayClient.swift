@@ -121,9 +121,16 @@ final class PushRelayClient: @unchecked Sendable {
     }
 
     func register(_ input: PushRelayRegistrationInput) async throws -> PushRelayRegisterResponse {
+        GatewayDiagnostics.pushRelay.stage(
+            "registration start origin=\(self.normalizedBaseURLString) "
+                + "apns=\(input.environment.rawValue) "
+                + "profile=\(input.relayProfile.rawValue) "
+                + "proof=\(input.proofPolicy.rawValue)")
         let challenge: PushRelayChallengeResponse
         do {
+            GatewayDiagnostics.pushRelay.stage("challenge request start")
             challenge = try await self.fetchChallenge()
+            GatewayDiagnostics.pushRelay.stage("challenge received")
         } catch {
             GatewayDiagnostics.pushRelay.failed("challenge request", error: error)
             throw error
@@ -148,18 +155,22 @@ final class PushRelayClient: @unchecked Sendable {
             proofPolicy: input.proofPolicy.rawValue)
         let appAttest: PushRelayAppAttestPayload?
         do {
+            GatewayDiagnostics.pushRelay.stage("app attest proof start")
             appAttest = try await self.createAppAttestProofIfNeeded(
                 proofPolicy: input.proofPolicy,
                 challenge: challenge.challenge,
                 signedPayloadData: signedPayloadData,
                 scope: appAttestScope)
+            GatewayDiagnostics.pushRelay.stage("app attest proof complete included=\(appAttest != nil)")
         } catch {
             GatewayDiagnostics.pushRelay.failed("app attest proof", error: error)
             throw error
         }
         let receipt: PushRelayReceiptPayload?
         do {
+            GatewayDiagnostics.pushRelay.stage("receipt proof start")
             receipt = try await self.createReceiptIfNeeded(proofPolicy: input.proofPolicy)
+            GatewayDiagnostics.pushRelay.stage("receipt proof complete included=\(receipt != nil)")
         } catch {
             GatewayDiagnostics.pushRelay.failed("receipt proof", error: error)
             throw error
@@ -169,6 +180,7 @@ final class PushRelayClient: @unchecked Sendable {
             simulatorProof = try self.createSimulatorProofIfNeeded(
                 proofPolicy: input.proofPolicy,
                 signedPayloadData: signedPayloadData)
+            GatewayDiagnostics.pushRelay.stage("simulator proof complete included=\(simulatorProof != nil)")
         } catch {
             GatewayDiagnostics.pushRelay.failed("simulator proof", error: error)
             throw error
@@ -187,6 +199,7 @@ final class PushRelayClient: @unchecked Sendable {
         let data: Data
         let response: URLResponse
         do {
+            GatewayDiagnostics.pushRelay.stage("register request start")
             (data, response) = try await self.session.data(for: request)
         } catch {
             GatewayDiagnostics.pushRelay.failed("register request", error: error)
@@ -208,7 +221,9 @@ final class PushRelayClient: @unchecked Sendable {
             throw relayError
         }
         do {
-            return try self.decode(PushRelayRegisterResponse.self, from: data)
+            let decoded = try self.decode(PushRelayRegisterResponse.self, from: data)
+            GatewayDiagnostics.pushRelay.stage("registration response decoded")
+            return decoded
         } catch {
             GatewayDiagnostics.pushRelay.failed("registration response decode", error: error)
             throw error

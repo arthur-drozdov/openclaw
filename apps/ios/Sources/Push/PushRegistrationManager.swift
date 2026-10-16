@@ -67,6 +67,10 @@ actor PushRegistrationManager {
         topic: String,
         gatewayIdentity: PushRelayGatewayIdentity)
     async throws -> String {
+        GatewayDiagnostics.pushRelay.stage(
+            "contract validated apns=\(self.buildConfig.apnsEnvironment.rawValue) "
+                + "profile=\(self.buildConfig.relayProfile.rawValue) "
+                + "proof=\(self.buildConfig.proofPolicy.rawValue)")
         guard let relayClient = self.relayClient else {
             throw PushRelayError.relayBaseURLMissing
         }
@@ -92,8 +96,10 @@ actor PushRegistrationManager {
            stored.lastAPNsTokenHashHex == tokenHashHex,
            !Self.isExpired(stored.relayHandleExpiresAtMs)
         {
+            GatewayDiagnostics.pushRelay.stage("using cached relay registration")
             registrationState = stored
         } else {
+            GatewayDiagnostics.pushRelay.stage("relay registration cache miss")
             let response = try await relayClient.register(PushRelayRegistrationInput(
                 installationId: installationId,
                 bundleId: bundleId,
@@ -118,6 +124,7 @@ actor PushRegistrationManager {
                 relayProfile: self.buildConfig.relayProfile.rawValue,
                 proofPolicy: self.buildConfig.proofPolicy.rawValue)
             _ = PushRelayRegistrationStore.saveRegistrationState(registrationState)
+            GatewayDiagnostics.pushRelay.stage("stored relay registration hasExpiry=\(response.expiresAtMs != nil)")
         }
         return try Self.encodePayload(
             RelayGatewayPushRegistrationPayload(
