@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { ApplicationContext } from "../../app/context.ts";
@@ -89,11 +89,9 @@ async function loadProfile(configObject: object, entries: Record<string, string>
     client,
   });
   const context = profileContext(scope, profileId, configObject);
-  return {
-    context,
-    previous: loadSettings(),
-    props: mountConfigPageState(context).state.configProps,
-  };
+  const previous = loadSettings();
+  const props = mountConfigPageState(context).state.configProps;
+  return { context, previous, props };
 }
 
 beforeEach(() => {
@@ -116,12 +114,8 @@ afterEach(() => {
 });
 
 it("distinguishes explicit values that equal the defaults", () => {
-  expect(
-    extractQuickSettingsSecurity({
-      browser: { enabled: true },
-      tools: { profile: "full" },
-    }),
-  ).toMatchObject({
+  const config = { browser: { enabled: true }, tools: { profile: "full" } };
+  expect(extractQuickSettingsSecurity(config)).toMatchObject({
     browserEnabled: true,
     browserEnabledOverridden: true,
     toolProfile: "full",
@@ -129,169 +123,156 @@ it("distinguishes explicit values that equal the defaults", () => {
   });
 });
 
-describe("ConfigPage synced preference provenance", () => {
-  it.each([
-    ["profile writer", { id: "profile-owner" }, "operator.write", false, true, false],
-    ["read-only profile", { id: "profile-viewer" }, "operator.read", true, false, true],
-    ["no bound profile", null, "operator.write", false, false, false],
-  ] as const)(
-    "sync authorization: %s",
-    (_label, selfUser, scope, canPatch, appearanceCanSync, localeCanSync) => {
-      const context = configContext({
-        gateway: { snapshot: { selfUser, hello: { auth: auth([scope]) } } },
-        runtimeConfig: { state: { connected: true }, canPatch },
-      });
-
-      for (const key of ["theme", "themeMode", "accent"] as const) {
-        expect(canSyncAppearancePreference(context, key)).toBe(appearanceCanSync);
-      }
-      for (const key of ["fontUi", "fontChat", "tabIcon"] as const) {
-        expect(canSyncAppearancePreference(context, key)).toBe(
-          Boolean(selfUser) && appearanceCanSync,
-        );
-      }
-      expect(canSyncAppearancePreference(context)).toBe(localeCanSync);
-    },
-  );
-
-  it("restores the gateway appearance default while queuing deletion of the profile override", async () => {
-    const configObject = { ui: { prefs: { theme: "dash" } } };
-    const { props, previous } = await loadProfile(configObject, { "ui.theme": "knot" });
-    props().setTheme("dash");
-
-    expect(loadSettings().theme).toBe("dash");
-    expect(changedServerUiPrefs(previous, loadSettings())).toEqual({
-      theme: null,
-      accent: "theme",
-      fontUi: null,
-      fontChat: null,
-    });
+it.each([
+  ["profile writer", { id: "profile-owner" }, "operator.write", false, true, false],
+  ["read-only profile", { id: "profile-viewer" }, "operator.read", true, false, true],
+  ["no bound profile", null, "operator.write", false, false, false],
+] as const)("sync authorization: %s", (_label, selfUser, scope, canPatch, appearance, locale) => {
+  const context = configContext({
+    gateway: { snapshot: { selfUser, hello: { auth: auth([scope]) } } },
+    runtimeConfig: { state: { connected: true }, canPatch },
   });
 
-  it.each([
-    ["loading", undefined],
-    ["disconnected", undefined],
-    ["before-load-disconnect", "#55bb77"],
-  ] as const)(
-    "reconciles the returned accent after a %s reset with server value %s",
-    async (connection, returnedAccent) => {
-      const profileId = "profile-viewer";
-      const scope = "ws://profile.test";
-      const configObject = { ui: { prefs: { accent: "#abcdef" } } };
-      const saved = { status: "ok", entries: { "ui.accent": "#123456" } };
-      const initial = createServerPrefsWriter(
-        vi.fn(async () => saved),
-        scope,
-      );
-      const options = { profileId, configObject, scope, onApplied: vi.fn() };
-      patchSettings({ gatewayUrl: scope });
-      await refreshProfileAppearancePrefs({ ...options, client: initial.state.client! });
-      resetServerUiPrefsSync();
-      flushServerUiPrefs(initial, { profileId, canWrite: false });
-      patchSettings({ accent: "#654321" });
-      pushServerUiPrefs(initial, { accent: "#654321" }, { profileId, canWrite: false });
+  for (const key of ["theme", "themeMode", "accent", "fontUi", "fontChat", "tabIcon"] as const) {
+    expect(canSyncAppearancePreference(context, key)).toBe(appearance);
+  }
+  expect(canSyncAppearancePreference(context)).toBe(locale);
+});
 
-      const delayed = deferred<unknown>();
-      const request = vi.fn((_method: string) => delayed.promise);
-      const writer = createServerPrefsWriter(request, scope);
-      const connected = connection === "loading";
-      let pending: Promise<boolean> | undefined;
-      if (connection !== "before-load-disconnect") {
-        applyServerUiPrefs(configObject, options);
-        pending = refreshProfileAppearancePrefs({ ...options, client: writer.state.client! });
-        await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
-      }
-      const context = profileContext(
-        scope,
-        connected ? profileId : null,
-        connected ? configObject : null,
-        ["operator.read"],
-      );
-      const previous = loadSettings();
-      const { state } = mountConfigPageState(context);
-      state.configProps().setAccent(undefined);
-      expect(loadSettings().accent).toBe("#123456");
-      expect(changedServerUiPrefs(previous, loadSettings())).toBeNull();
+it("restores the gateway appearance default while queuing deletion of the profile override", async () => {
+  const configObject = { ui: { prefs: { theme: "dash" } } };
+  const { props, previous } = await loadProfile(configObject, { "ui.theme": "knot" });
+  props().setTheme("dash");
 
-      const reconnected = connected
-        ? undefined
-        : refreshProfileAppearancePrefs({
-            ...options,
-            client: createServerPrefsWriter(request, scope).state.client!,
-          });
-      delayed.resolve({
-        status: "ok",
-        entries: returnedAccent ? { "ui.accent": returnedAccent } : {},
-      });
-      await Promise.all([pending, reconnected]);
-      expect(loadSettings().accent).toBe(returnedAccent ?? "#abcdef");
-      expect(request.mock.calls.every(([method]) => method === "users.prefs.get")).toBe(true);
-    },
-  );
-
-  it("resets the fontUi profile override when its picker sentinel is selected", async () => {
-    const { context, props, previous } = await loadProfile({}, { "ui.fontUi": "lora" });
-    props().setFontUi(undefined);
-    expect(loadSettings().fontUi).toBeUndefined();
-    expect(changedServerUiPrefs(previous, loadSettings())).toEqual({ fontUi: null });
-    expect(context.theme.refresh).toHaveBeenCalledOnce();
-  });
-
-  it("uses the committed snapshot for both display and reset while the form draft differs", async () => {
-    const committedConfig = { ui: { prefs: { theme: "claw" } } };
-    const draftConfig = { ui: { prefs: { theme: "knot" } } };
-    const runtimeConfig = {
-      state: {
-        connected: true,
-        configRaw: JSON.stringify(draftConfig),
-        configRawOriginal: JSON.stringify(committedConfig),
-        configSnapshot: { config: committedConfig },
-        configSchema: { type: "object", properties: {} },
-        configForm: draftConfig,
-        configFormOriginal: committedConfig,
-        configFormDirty: true,
-      },
-      patchForm: vi.fn(),
-    };
-    const context = configContext({
-      gateway: {
-        connection: { gatewayUrl: "ws://committed.test" },
-        snapshot: {
-          hello: { auth: auth() },
-          phase: "connected",
-        },
-      },
-      runtimeConfig,
-      agentSelection: { state: { selectedId: null } },
-      theme: { refresh: vi.fn() },
-    });
-    const beforeReset = loadSettings();
-    const { container } = mountConfigPage(context, { pageId: "appearance" });
-
-    const themeSection = await waitForSolid(() => {
-      const section = container.querySelector<HTMLElement>("#settings-appearance-theme");
-      expect(section?.textContent).toContain("Default: Claw");
-      return section!;
-    });
-    expect(themeSection?.textContent).toContain("Synced across your devices");
-    expect(themeSection?.textContent).not.toContain("Default: Knot");
-    expect(themeSection?.textContent).not.toContain("Stored in this browser only");
-
-    themeSection?.querySelector<HTMLButtonElement>(".settings-theme-card--claw")?.click();
-
-    expect(changedServerUiPrefs(beforeReset, loadSettings())).toEqual({ theme: null });
+  expect(loadSettings().theme).toBe("dash");
+  expect(changedServerUiPrefs(previous, loadSettings())).toEqual({
+    theme: null,
+    accent: "theme",
+    fontUi: null,
+    fontChat: null,
   });
 });
 
 it.each([
-  ["microphone", "queued gesture disconnects"],
-  ["microphone", "reentry without a fresh gesture"],
-  ["microphone", "reentry with a fresh gesture"],
-  ["microphone", "failed passive enumeration keeps one upgrade"],
-  ["microphone", "second enumeration leaves Appearance"],
-  ["microphone", "permission-bearing enumeration fails once"],
-  ["camera", "reentry with a fresh gesture"],
-] as const)("%s: %s", async (kind, scenario) => {
+  ["loading", undefined],
+  ["disconnected", undefined],
+  ["before-load-disconnect", "#55bb77"],
+] as const)(
+  "reconciles the returned accent after a %s reset with server value %s",
+  async (connection, returnedAccent) => {
+    const profileId = "profile-viewer";
+    const scope = "ws://profile.test";
+    const configObject = { ui: { prefs: { accent: "#abcdef" } } };
+    const saved = { status: "ok", entries: { "ui.accent": "#123456" } };
+    const initial = createServerPrefsWriter(
+      vi.fn(async () => saved),
+      scope,
+    );
+    const options = { profileId, configObject, scope, onApplied: vi.fn() };
+    patchSettings({ gatewayUrl: scope });
+    await refreshProfileAppearancePrefs({ ...options, client: initial.state.client! });
+    resetServerUiPrefsSync();
+    flushServerUiPrefs(initial, { profileId, canWrite: false });
+    patchSettings({ accent: "#654321" });
+    pushServerUiPrefs(initial, { accent: "#654321" }, { profileId, canWrite: false });
+
+    const delayed = deferred<unknown>();
+    const request = vi.fn((_method: string) => delayed.promise);
+    const writer = createServerPrefsWriter(request, scope);
+    const connected = connection === "loading";
+    let pending: Promise<boolean> | undefined;
+    if (connection !== "before-load-disconnect") {
+      applyServerUiPrefs(configObject, options);
+      pending = refreshProfileAppearancePrefs({ ...options, client: writer.state.client! });
+      await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+    }
+    const context = profileContext(
+      scope,
+      connected ? profileId : null,
+      connected ? configObject : null,
+      ["operator.read"],
+    );
+    const previous = loadSettings();
+    const { state } = mountConfigPageState(context);
+    state.configProps().setAccent(undefined);
+    expect(loadSettings().accent).toBe("#123456");
+    expect(changedServerUiPrefs(previous, loadSettings())).toBeNull();
+
+    const reconnected = connected
+      ? undefined
+      : refreshProfileAppearancePrefs({
+          ...options,
+          client: createServerPrefsWriter(request, scope).state.client!,
+        });
+    delayed.resolve({
+      status: "ok",
+      entries: returnedAccent ? { "ui.accent": returnedAccent } : {},
+    });
+    await Promise.all([pending, reconnected]);
+    expect(loadSettings().accent).toBe(returnedAccent ?? "#abcdef");
+    expect(request.mock.calls.every(([method]) => method === "users.prefs.get")).toBe(true);
+  },
+);
+
+it("resets the fontUi profile override when its picker sentinel is selected", async () => {
+  const { context, props, previous } = await loadProfile({}, { "ui.fontUi": "lora" });
+  props().setFontUi(undefined);
+  expect(loadSettings().fontUi).toBeUndefined();
+  expect(changedServerUiPrefs(previous, loadSettings())).toEqual({ fontUi: null });
+  expect(context.theme.refresh).toHaveBeenCalledOnce();
+});
+
+it("uses the committed snapshot for both display and reset while the form draft differs", async () => {
+  const committedConfig = { ui: { prefs: { theme: "claw" } } };
+  const draftConfig = { ui: { prefs: { theme: "knot" } } };
+  const runtimeConfig = {
+    state: {
+      connected: true,
+      configSnapshot: { config: committedConfig },
+      configSchema: { type: "object", properties: {} },
+      configForm: draftConfig,
+      configFormOriginal: committedConfig,
+      configFormDirty: true,
+    },
+    patchForm: vi.fn(),
+  };
+  const context = configContext({
+    gateway: {
+      connection: { gatewayUrl: "ws://committed.test" },
+      snapshot: {
+        hello: { auth: auth() },
+        phase: "connected",
+      },
+    },
+    runtimeConfig,
+    theme: { refresh: vi.fn() },
+  });
+  const beforeReset = loadSettings();
+  const { container } = mountConfigPage(context, { pageId: "appearance" });
+
+  const themeSection = await waitForSolid(() => {
+    const section = container.querySelector<HTMLElement>("#settings-appearance-theme");
+    expect(section?.textContent).toContain("Default: Claw");
+    return section!;
+  });
+  expect(themeSection?.textContent).toContain("Synced across your devices");
+  expect(themeSection?.textContent).not.toContain("Default: Knot");
+  expect(themeSection?.textContent).not.toContain("Stored in this browser only");
+
+  themeSection?.querySelector<HTMLButtonElement>(".settings-theme-card--claw")?.click();
+
+  expect(changedServerUiPrefs(beforeReset, loadSettings())).toEqual({ theme: null });
+});
+
+it.each([
+  ["microphone", "disconnect"],
+  ["microphone", "reentry"],
+  ["microphone", "reentry with gesture"],
+  ["microphone", "passive failure"],
+  ["microphone", "leave during retry"],
+  ["microphone", "permission failure"],
+  ["camera", "reentry with gesture"],
+] as const)("%s permission lifetime: %s", async (kind, scenario) => {
   const initial = deferred<MediaDeviceInfo[]>();
   const second = deferred<MediaDeviceInfo[]>();
   const enumerateDevices = vi.fn().mockResolvedValue([]);
@@ -305,7 +286,7 @@ it.each([
     expect(props()).toMatchObject({ microphone: { loading: false }, camera: { loading: false } });
   });
   enumerateDevices.mockReset().mockResolvedValue([]);
-  const startsWithPermission = scenario.startsWith("permission-bearing");
+  const startsWithPermission = scenario === "permission failure";
   // devicechange refreshes both pickers; only this scenario's picker is delayed.
   if (!startsWithPermission && kind === "camera") {
     enumerateDevices.mockResolvedValueOnce([]);
@@ -314,55 +295,46 @@ it.each([
   if (!startsWithPermission && kind === "microphone") {
     enumerateDevices.mockResolvedValueOnce([]);
   }
-  if (scenario === "second enumeration leaves Appearance") {
+  if (scenario === "leave during retry") {
     enumerateDevices.mockReturnValueOnce(second.promise);
   }
   const refresh = () =>
     kind === "microphone" ? props().onMicrophoneRefresh?.() : props().onCameraRefresh?.();
-  if (startsWithPermission) {
-    refresh();
-  } else {
+  if (!startsWithPermission) {
     devices.dispatchEvent(new Event("devicechange"));
-    refresh();
   }
+  refresh();
   const initialCalls = startsWithPermission ? 1 : 2;
   expect(enumerateDevices).toHaveBeenCalledTimes(initialCalls);
   expect(getUserMedia).not.toHaveBeenCalled();
 
-  if (scenario === "queued gesture disconnects") {
+  if (scenario === "disconnect") {
     page.dispose();
   } else if (scenario.startsWith("reentry")) {
     page.update({ pageId: "advanced" });
     page.update({ pageId: "appearance" });
-    if (scenario === "reentry with a fresh gesture") {
+    if (scenario === "reentry with gesture") {
       refresh();
     }
   }
-  if (
-    scenario === "failed passive enumeration keeps one upgrade" ||
-    scenario === "second enumeration leaves Appearance" ||
-    scenario === "permission-bearing enumeration fails once"
-  ) {
+  if (["passive failure", "leave during retry", "permission failure"].includes(scenario)) {
     initial.reject(new DOMException("Synthetic inactive enumeration", "InvalidStateError"));
   } else {
     initial.resolve([]);
   }
-  if (scenario === "second enumeration leaves Appearance") {
+  if (scenario === "leave during retry") {
     await waitForSolid(() => expect(enumerateDevices).toHaveBeenCalledTimes(initialCalls + 1));
     page.update({ pageId: "advanced" });
     second.resolve([]);
   }
-  if (scenario === "queued gesture disconnects") {
+  if (scenario === "disconnect") {
     await initial.promise;
     await Promise.resolve();
     flush();
   } else {
     await waitForSolid(() => expect(props()[kind]?.loading).toBe(false));
   }
-  const permits = [
-    "reentry with a fresh gesture",
-    "failed passive enumeration keeps one upgrade",
-  ].includes(scenario);
+  const permits = ["reentry with gesture", "passive failure"].includes(scenario);
   expect(getUserMedia).toHaveBeenCalledTimes(permits ? 1 : 0);
   expect(stop).toHaveBeenCalledTimes(permits ? 1 : 0);
   if (permits) {
@@ -370,7 +342,7 @@ it.each([
       kind === "microphone" ? { audio: true } : { video: true },
     );
   }
-  if (scenario === "permission-bearing enumeration fails once") {
+  if (scenario === "permission failure") {
     expect(enumerateDevices).toHaveBeenCalledOnce();
     expect(props()[kind]?.error).toBeTruthy();
   }
@@ -416,247 +388,233 @@ it("persists only confirmed camera selections and ignores superseded failures", 
   expect(loadSettings().realtimeTalkVideoDeviceId).toBeUndefined();
 });
 
-describe("ConfigPage curated mutation eligibility", () => {
-  it("updates mobile pairing eligibility when connection and admin access are published", () => {
-    const openDevicePairSetup = vi.fn();
-    const context = configContext({
-      gateway: { snapshot: { phase: "disconnected", hello: null, client: null } },
-      runtimeConfig: { state: { connected: false } },
-      overlays: { openDevicePairSetup },
-    });
-    const view = mountConfigPage(context, { pageId: "security" });
-    const pairingButton = view.container.querySelector<HTMLButtonElement>(
-      ".security-page button.btn",
-    )!;
-    expect(pairingButton.disabled).toBe(true);
-
-    context.runtimeConfig.state.connected = true;
-    Object.assign(context.gateway.snapshot, {
-      phase: "connected",
-      hello: { auth: auth() },
-    });
-    publishConfigSource(context.runtimeConfig);
-    expect(pairingButton.disabled).toBe(false);
-    pairingButton.click();
-    expect(openDevicePairSetup).toHaveBeenCalledOnce();
-
-    Object.assign(context.gateway.snapshot, {
-      hello: { auth: auth(["operator.read"]) },
-    });
-    publishConfigSource(context.gateway);
-    expect(pairingButton.disabled).toBe(true);
-    pairingButton.click();
-    expect(openDevicePairSetup).toHaveBeenCalledOnce();
-
-    Object.assign(context.gateway.snapshot, {
-      hello: { auth: auth() },
-    });
-    publishConfigSource(context.gateway);
-    expect(pairingButton.disabled).toBe(false);
-    context.runtimeConfig.state.connected = false;
-    publishConfigSource(context.runtimeConfig);
-    expect(pairingButton.disabled).toBe(true);
+it("updates mobile pairing eligibility when connection and admin access are published", () => {
+  const openDevicePairSetup = vi.fn();
+  const context = configContext({
+    gateway: { snapshot: { phase: "disconnected", hello: null, client: null } },
+    runtimeConfig: { state: { connected: false } },
+    overlays: { openDevicePairSetup },
   });
+  const view = mountConfigPage(context, { pageId: "security" });
+  const pairingButton = view.container.querySelector<HTMLButtonElement>(
+    ".security-page button.btn",
+  )!;
+  expect(pairingButton.disabled).toBe(true);
 
-  it.each([
-    ["read-only operator", ["operator.read"], true],
-    ["config.set absent", ["operator.admin"], false],
-  ] as const)("locks server-backed controls for %s", (_name, scopes, canSet) => {
-    const context = configContext({
-      runtimeConfig: { canSet, state: { connected: true } },
-      gateway: { snapshot: { hello: { auth: auth([...scopes]) } } },
-      overlays: { snapshot: { updateRunning: false, updateReconciliationPending: false } },
-    });
-
-    const { state } = mountConfigPageState(context);
-    expect(state.mutationDisabled()).toBe(true);
+  context.runtimeConfig.state.connected = true;
+  Object.assign(context.gateway.snapshot, {
+    phase: "connected",
+    hello: { auth: auth() },
   });
+  publishConfigSource(context.runtimeConfig);
+  expect(pairingButton.disabled).toBe(false);
+  pairingButton.click();
+  expect(openDevicePairSetup).toHaveBeenCalledOnce();
+
+  Object.assign(context.gateway.snapshot, {
+    hello: { auth: auth(["operator.read"]) },
+  });
+  publishConfigSource(context.gateway);
+  expect(pairingButton.disabled).toBe(true);
+  pairingButton.click();
+  expect(openDevicePairSetup).toHaveBeenCalledOnce();
+
+  Object.assign(context.gateway.snapshot, {
+    hello: { auth: auth() },
+  });
+  publishConfigSource(context.gateway);
+  expect(pairingButton.disabled).toBe(false);
+  context.runtimeConfig.state.connected = false;
+  publishConfigSource(context.runtimeConfig);
+  expect(pairingButton.disabled).toBe(true);
 });
 
-describe("ConfigPage Updates integration", () => {
-  it("refreshes update status once when the page becomes active", async () => {
-    const refreshUpdateStatus = vi.fn(async () => {});
-    const context = configContext({
-      gateway: connectedGateway(["update.status"]),
-      overlays: { refreshUpdateStatus },
-    });
-
-    const view = mountConfigPage(context, { pageId: "updates" });
-    publishConfigSource(context.gateway);
-    publishConfigSource(context.overlays);
-    await waitForSolid(() => expect(refreshUpdateStatus).toHaveBeenCalledOnce());
-
-    view.update({ pageId: "advanced" });
-    view.update({ pageId: "updates" });
-    await waitForSolid(() => expect(refreshUpdateStatus).toHaveBeenCalledTimes(2));
+it.each([
+  ["read-only operator", ["operator.read"], true],
+  ["config.set absent", ["operator.admin"], false],
+] as const)("locks server-backed controls for %s", (_name, scopes, canSet) => {
+  const context = configContext({
+    runtimeConfig: { canSet, state: { connected: true } },
+    gateway: { snapshot: { hello: { auth: auth([...scopes]) } } },
+    overlays: { snapshot: { updateRunning: false, updateReconciliationPending: false } },
   });
 
-  it("stages policy changes through patchForm and confirms Update now before overlays", async () => {
-    const patchForm = vi.fn();
-    const updateActions = {
-      captureUpdateTarget: () => () => true,
-      runUpdate: vi.fn<ApplicationContext["overlays"]["runUpdate"]>(),
-    } satisfies Pick<ApplicationContext["overlays"], "captureUpdateTarget" | "runUpdate">;
-    const { runUpdate } = updateActions;
-    const context = configContext({
-      config: {
-        current: { assistantIdentity: { name: "OpenClaw" }, serverVersion: "2026.8.1" },
-      },
-      runtimeConfig: {
-        canSet: true,
-        state: {
-          connected: true,
-          configForm: { update: { channel: "stable", auto: { enabled: false } } },
-          configSnapshot: null,
-        },
-        patchForm,
-      },
-      gateway: connectedGateway(["update.run"]),
-      overlays: {
-        snapshot: {
-          updateAvailable: null,
-          updateSchedule: { channel: "stable", autoEnabled: false },
-          updateRunning: false,
-          updateReconciliationPending: false,
-          updateStatusBanner: null,
-        },
-        ...updateActions,
-      },
-    });
-    const { container } = mountConfigPage(context, { pageId: "updates" });
-    const restoreDialogPolyfill = installDialogPolyfill();
-    const updateButton = () => container.querySelector<HTMLButtonElement>(".btn.primary")!;
-    const status = () => container.querySelector(".settings-status")?.textContent;
+  const { state } = mountConfigPageState(context);
+  expect(state.mutationDisabled()).toBe(true);
+});
 
-    context.overlays.snapshot.updateStatusRefreshing = true;
-    publishConfigSource(context.overlays);
-    const checkingButton = updateButton();
-    expect(checkingButton.textContent?.trim()).toBe("Update now");
-    expect(checkingButton).toMatchObject({ disabled: true, title: "Checking for updates…" });
-    expect(status()).toContain("Checking for updates…");
-    expect(container.querySelector<HTMLInputElement>(".settings-segmented__input")?.disabled).toBe(
-      true,
+it("refreshes update status once when the page becomes active", async () => {
+  const refreshUpdateStatus = vi.fn(async () => {});
+  const context = configContext({
+    gateway: connectedGateway(["update.status"]),
+    overlays: { refreshUpdateStatus },
+  });
+
+  const view = mountConfigPage(context, { pageId: "updates" });
+  publishConfigSource(context.gateway);
+  publishConfigSource(context.overlays);
+  await waitForSolid(() => expect(refreshUpdateStatus).toHaveBeenCalledOnce());
+
+  view.update({ pageId: "advanced" });
+  view.update({ pageId: "updates" });
+  await waitForSolid(() => expect(refreshUpdateStatus).toHaveBeenCalledTimes(2));
+});
+
+it("stages policy changes through patchForm and confirms Update now before overlays", async () => {
+  const patchForm = vi.fn();
+  const updateActions = {
+    captureUpdateTarget: () => () => true,
+    runUpdate: vi.fn<ApplicationContext["overlays"]["runUpdate"]>(),
+  } satisfies Pick<ApplicationContext["overlays"], "captureUpdateTarget" | "runUpdate">;
+  const { runUpdate } = updateActions;
+  const context = configContext({
+    runtimeConfig: {
+      canSet: true,
+      state: {
+        connected: true,
+        configForm: { update: { channel: "stable", auto: { enabled: false } } },
+      },
+      patchForm,
+    },
+    gateway: connectedGateway(["update.run"]),
+    overlays: {
+      snapshot: {
+        updateSchedule: { channel: "stable", autoEnabled: false },
+        updateRunning: false,
+        updateReconciliationPending: false,
+      },
+      ...updateActions,
+    },
+  });
+  const { container } = mountConfigPage(context, { pageId: "updates" });
+  const restoreDialogPolyfill = installDialogPolyfill();
+  const updateButton = () => container.querySelector<HTMLButtonElement>(".btn.primary")!;
+  const status = () => container.querySelector(".settings-status")?.textContent;
+
+  context.overlays.snapshot.updateStatusRefreshing = true;
+  publishConfigSource(context.overlays);
+  const checkingButton = updateButton();
+  expect(checkingButton.textContent?.trim()).toBe("Update now");
+  expect(checkingButton).toMatchObject({ disabled: true, title: "Checking for updates…" });
+  expect(status()).toContain("Checking for updates…");
+  expect(container.querySelector<HTMLInputElement>(".settings-segmented__input")?.disabled).toBe(
+    true,
+  );
+  context.overlays.snapshot.updateStatusRefreshing = false;
+  context.overlays.snapshot.updateStatusCheckBanner = {
+    mode: "manual",
+    tone: "warn",
+    text: "Could not check for updates: timeout",
+  };
+  publishConfigSource(context.overlays);
+  expect(updateButton()).toMatchObject({
+    disabled: true,
+    title: "Check for updates successfully before starting an update.",
+  });
+
+  context.overlays.snapshot.updateSchedule = {
+    channel: "dev",
+    autoEnabled: false,
+    install: { kind: "git", git: { status: "diverged", commitsAhead: 1, commitsBehind: 3 } },
+  };
+  publishConfigSource(context.overlays);
+  expect(updateButton()).toMatchObject({ disabled: false, title: "" });
+  expect(status()).toContain("Could not check for updates: timeout");
+  expect(runUpdate).not.toHaveBeenCalled();
+
+  container.querySelector<HTMLInputElement>('.settings-segmented__input[value="beta"]')!.click();
+  const policySwitches = [
+    ...container.querySelectorAll<HTMLInputElement>(".settings-toggle__input"),
+  ];
+  const togglePolicy = (title: string, checked: boolean) => {
+    const control = policySwitches.find(
+      (input) =>
+        input
+          .closest(".settings-row")
+          ?.querySelector(".settings-row__title")
+          ?.textContent?.trim() === title,
     );
-    context.overlays.snapshot.updateStatusRefreshing = false;
-    context.overlays.snapshot.updateStatusCheckBanner = {
-      mode: "manual",
-      tone: "warn",
-      text: "Could not check for updates: timeout",
-    };
-    publishConfigSource(context.overlays);
-    expect(updateButton()).toMatchObject({
-      disabled: true,
-      title: "Check for updates successfully before starting an update.",
-    });
-
-    context.overlays.snapshot.updateSchedule = {
-      channel: "dev",
-      autoEnabled: false,
-      install: { kind: "git", git: { status: "diverged", commitsAhead: 1, commitsBehind: 3 } },
-    };
-    publishConfigSource(context.overlays);
-    expect(updateButton()).toMatchObject({ disabled: false, title: "" });
-    expect(status()).toContain("Could not check for updates: timeout");
-    expect(runUpdate).not.toHaveBeenCalled();
-
-    container.querySelector<HTMLInputElement>('.settings-segmented__input[value="beta"]')!.click();
-    const policySwitches = [
-      ...container.querySelectorAll<HTMLInputElement>(".settings-toggle__input"),
-    ];
-    for (const [title, checked] of [
-      ["Check for updates", false],
-      ["Automatic updates", true],
-    ] as const) {
-      const control = policySwitches.find(
-        (input) =>
-          input
-            .closest(".settings-row")
-            ?.querySelector(".settings-row__title")
-            ?.textContent?.trim() === title,
-      );
-      if (!control) {
-        throw new Error(`Missing ${title} control`);
-      }
-      control.checked = checked;
-      control.dispatchEvent(new Event("change"));
+    if (!control) {
+      throw new Error(`Missing ${title} control`);
     }
-    updateButton().click();
-    await nextFrame();
+    control.checked = checked;
+    control.dispatchEvent(new Event("change"));
+  };
+  togglePolicy("Check for updates", false);
+  togglePolicy("Automatic updates", true);
+  updateButton().click();
+  await nextFrame();
 
-    expect(patchForm).toHaveBeenCalledWith(["update", "channel"], "beta");
-    expect(patchForm).toHaveBeenCalledWith(["update", "checkOnStart"], false);
-    expect(patchForm).toHaveBeenCalledWith(["update", "auto", "enabled"], true);
-    // Settings shares the sidebar card's confirmation gate: nothing runs on the click itself.
-    expect(runUpdate).not.toHaveBeenCalled();
+  expect(patchForm).toHaveBeenCalledWith(["update", "channel"], "beta");
+  expect(patchForm).toHaveBeenCalledWith(["update", "checkOnStart"], false);
+  expect(patchForm).toHaveBeenCalledWith(["update", "auto", "enabled"], true);
+  expect(runUpdate).not.toHaveBeenCalled();
 
-    const { modal } = await waitForRenderedModalDialog(document.body);
-    [...modal.querySelectorAll("button")]
-      .find((button) => button.textContent?.trim() === "Update and restart")
-      ?.click();
-    await nextFrame();
+  const { modal } = await waitForRenderedModalDialog(document.body);
+  [...modal.querySelectorAll("button")]
+    .find((button) => button.textContent?.trim() === "Update and restart")
+    ?.click();
+  await nextFrame();
 
-    expect(runUpdate).toHaveBeenCalledOnce();
-    restoreDialogPolyfill();
-  });
+  expect(runUpdate).toHaveBeenCalledOnce();
+  restoreDialogPolyfill();
 });
 
-describe("ConfigPage runtime config lifecycle", () => {
-  function createRuntimeConfig() {
-    const state = {
-      configSnapshot: null,
-      configLoading: false,
-      configSchema: null,
-      configSchemaLoading: false,
-    };
-    return {
-      state,
-      ensureLoaded: vi.fn(async () => {
-        state.configLoading = true;
-        await Promise.resolve();
-        Object.assign(state, { configLoading: false, configSnapshot: { config: {} } });
-      }),
-      ensureSchemaLoaded: vi.fn(async () => {
-        Object.assign(state, { configSchema: {} });
-      }),
-    };
+function createRuntimeConfig() {
+  const state = {
+    configSnapshot: null,
+    configLoading: false,
+    configSchema: null,
+    configSchemaLoading: false,
+  };
+  return {
+    state,
+    ensureLoaded: vi.fn(async () => {
+      state.configLoading = true;
+      await Promise.resolve();
+      Object.assign(state, { configLoading: false, configSnapshot: { config: {} } });
+    }),
+    ensureSchemaLoaded: vi.fn(async () => {
+      Object.assign(state, { configSchema: {} });
+    }),
+  };
+}
+
+it("loads Updates without requesting the admin-only config schema", async () => {
+  const runtimeConfig = createRuntimeConfig();
+
+  mountConfigPageState(configContext({ runtimeConfig }), { pageId: "updates" });
+  // SAFETY: mounting flushes owner setup and starts ensureLoaded before returning.
+  await runtimeConfig.ensureLoaded.mock.results[0]!.value;
+  await Promise.resolve();
+
+  expect(runtimeConfig.ensureLoaded).toHaveBeenCalledOnce();
+  expect(runtimeConfig.ensureSchemaLoaded).not.toHaveBeenCalled();
+});
+
+it("loads replacement sources and clears sensitive reveal state", async () => {
+  const first = createRuntimeConfig();
+  const second = createRuntimeConfig();
+
+  const context = configContext({ runtimeConfig: first });
+  const { state } = mountConfigPageState(context);
+  await waitForSolid(() => expect(first.ensureSchemaLoaded).toHaveBeenCalledOnce());
+  const viewState = state.configProps().viewState;
+  Object.assign(viewState, { rawRevealed: true, envRevealed: true });
+  viewState.revealedSensitivePaths.add("gateway.auth.token");
+  state.configProps().onViewStateChange();
+  flush();
+  Object.assign(context, { runtimeConfig: second });
+  publishConfigSource(context.gateway);
+  await waitForSolid(() => expect(second.ensureSchemaLoaded).toHaveBeenCalledOnce());
+
+  for (const source of [first, second]) {
+    expect(source.ensureLoaded).toHaveBeenCalledOnce();
+    expect(source.ensureSchemaLoaded).toHaveBeenCalledOnce();
   }
-
-  it("loads Updates without requesting the admin-only config schema", async () => {
-    const runtimeConfig = createRuntimeConfig();
-
-    mountConfigPageState(configContext({ runtimeConfig }), { pageId: "updates" });
-    // SAFETY: mounting flushes owner setup and starts ensureLoaded before returning.
-    await runtimeConfig.ensureLoaded.mock.results[0]!.value;
-    await Promise.resolve();
-
-    expect(runtimeConfig.ensureLoaded).toHaveBeenCalledOnce();
-    expect(runtimeConfig.ensureSchemaLoaded).not.toHaveBeenCalled();
+  expect(state.configProps().viewState).toMatchObject({
+    rawRevealed: false,
+    envRevealed: false,
   });
-
-  it("loads replacement sources and clears sensitive reveal state", async () => {
-    const first = createRuntimeConfig();
-    const second = createRuntimeConfig();
-
-    const context = configContext({ runtimeConfig: first });
-    const { state } = mountConfigPageState(context);
-    await waitForSolid(() => expect(first.ensureSchemaLoaded).toHaveBeenCalledOnce());
-    const viewState = state.configProps().viewState;
-    Object.assign(viewState, { rawRevealed: true, envRevealed: true });
-    viewState.revealedSensitivePaths.add("gateway.auth.token");
-    state.configProps().onViewStateChange();
-    flush();
-    Object.assign(context, { runtimeConfig: second });
-    publishConfigSource(context.gateway);
-    await waitForSolid(() => expect(second.ensureSchemaLoaded).toHaveBeenCalledOnce());
-
-    for (const source of [first, second]) {
-      expect(source.ensureLoaded).toHaveBeenCalledOnce();
-      expect(source.ensureSchemaLoaded).toHaveBeenCalledOnce();
-    }
-    expect(state.configProps().viewState).toMatchObject({
-      rawRevealed: false,
-      envRevealed: false,
-    });
-    expect(state.configProps().viewState.revealedSensitivePaths.size).toBe(0);
-  });
+  expect(state.configProps().viewState.revealedSensitivePaths.size).toBe(0);
 });

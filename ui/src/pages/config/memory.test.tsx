@@ -107,8 +107,7 @@ it("retains engine and add-on controls when their owner publishes new state", ()
     'input[type="radio"][value="memory-core"]',
   );
   const addon = container.querySelector<HTMLInputElement>('input[type="checkbox"]');
-  expect(engine).not.toBeNull();
-  expect(addon).not.toBeNull();
+  expect([engine, addon]).not.toContain(null);
   engine!.focus();
 
   setProps((current) => ({

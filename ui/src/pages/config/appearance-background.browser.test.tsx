@@ -92,27 +92,29 @@ function key(range: HTMLInputElement, value: string) {
   range.dispatchEvent(new KeyboardEvent("keydown", { key: value, bubbles: true }));
 }
 
+function activate(range: HTMLInputElement, gesture: "drag" | "Home" | "ArrowRight" = "ArrowRight") {
+  if (gesture === "drag") {
+    press(range);
+  } else {
+    key(range, gesture);
+  }
+  flush();
+}
+
 type Preview = Awaited<ReturnType<typeof mount>>;
+const disabledPlacement = { showOnNewSession: false, showInSessions: false };
 it("holds during a drag, settles 1.2 seconds after release, and keeps focused controls opaque", async () => {
-  const { element, range, preview } = await mount({
-    presentation: "full-bleed",
-    showOnNewSession: false,
-    showInSessions: false,
-  });
+  const preference = { ...disabledPlacement, presentation: "full-bleed" } as const;
+  const { element, range, preview } = await mount(preference);
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   range.focus();
   const before = range.getBoundingClientRect();
-  press(range);
-  flush();
+  activate(range, "drag");
   await preview.updateComplete;
   expect(preview).toMatchObject({
     surface: "preview",
     presented: true,
-    preferenceOverride: {
-      presentation: "full-bleed",
-      showOnNewSession: false,
-      showInSessions: false,
-    },
+    preferenceOverride: preference,
   });
   expect(element.hasAttribute("data-background-preview")).toBe(true);
   expect(host.hasAttribute("data-background-preview")).toBe(true);
@@ -154,8 +156,7 @@ it("shows keyboard changes without focus activation and resets the brief settle 
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   range.focus();
   expect(preview.presented).toBe(false);
-  key(range, "ArrowRight");
-  flush();
+  activate(range);
   expect(preview.presented).toBe(true);
   await vi.advanceTimersByTimeAsync(1000);
   key(range, "End");
@@ -169,12 +170,7 @@ it("shows keyboard changes without focus activation and resets the brief settle 
 
 it.each(["drag", "same-turn keyboard"])("reopens after Escape from %s", async (gesture) => {
   const { range, preview } = await mount();
-  if (gesture === "drag") {
-    press(range);
-  } else {
-    key(range, "ArrowRight");
-  }
-  flush();
+  activate(range, gesture === "drag" ? "drag" : "ArrowRight");
   key(range, "Escape");
   expect(preview.presented).toBe(false);
   if (gesture === "drag") {
@@ -193,13 +189,7 @@ it.each([
   ["window-blur", () => window.dispatchEvent(new Event("blur"))],
   ["pointercancel", ({ range }) => press(range, "pointercancel")],
   ["navigation", ({ navigate }) => navigate()],
-  [
-    "disconnect",
-    ({ dispose, element }) => {
-      dispose();
-      element.remove();
-    },
-  ],
+  ["disconnect", ({ dispose }) => dispose()],
   [
     "profile replacement",
     ({ gateway }) =>
@@ -213,12 +203,7 @@ it.each([
     const { element, range, preview } = view;
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     range.focus();
-    if (reason === "profile replacement") {
-      press(range);
-    } else {
-      key(range, "Home");
-    }
-    flush();
+    activate(range, reason === "profile replacement" ? "drag" : "Home");
     expect(preview.presented).toBe(true);
     retire(view);
     expect(preview.presented).toBe(false);
@@ -231,13 +216,8 @@ it.each([
 );
 
 it("passes live preferences to the shared renderer without enabling disabled placement", async () => {
-  const { range, preview, settings, theme } = await mount({
-    visibility: 0,
-    showOnNewSession: false,
-    showInSessions: false,
-  });
-  key(range, "ArrowRight");
-  flush();
+  const { range, preview, settings, theme } = await mount({ ...disabledPlacement, visibility: 0 });
+  activate(range);
   await preview.updateComplete;
   expect(preview.preferenceOverride?.visibility).toBe(0);
   expect(preview.querySelector(".session-background__image")).toBeNull();
@@ -245,11 +225,7 @@ it("passes live preferences to the shared renderer without enabling disabled pla
   theme.refresh();
   flush();
   await preview.updateComplete;
-  expect(preview.preferenceOverride).toMatchObject({
-    visibility: 0.8,
-    showOnNewSession: false,
-    showInSessions: false,
-  });
+  expect(preview.preferenceOverride).toMatchObject({ ...disabledPlacement, visibility: 0.8 });
   expect(range.getAttribute("aria-valuetext")).toBe("80%");
   expect(preview.querySelector(".session-background__image")).not.toBeNull();
   settings.background = { ...settings.background, source: { kind: "none" } };

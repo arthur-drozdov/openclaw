@@ -44,10 +44,11 @@ function query<T extends Element = HTMLElement>(root: ParentNode, selector: stri
 }
 const emptyRequest = () =>
   vi.fn((method: string) => Promise.resolve(method === "models.list" ? { models: [] } : {}));
+const observerPicker = "#settings-appearance-sidebar openclaw-select-picker";
+type ModelPicker = HTMLElement & { params: { options: Array<{ value: string; label: string }> } };
 
 afterEach(() => {
   cleanupSolid();
-  document.body.replaceChildren();
   resetServerUiPrefsSync();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -62,19 +63,15 @@ describe("ConfigPage navigation", () => {
   });
 
   it("keeps curated sections off the Advanced page", () => {
-    for (const [section, activeSection] of [
-      ["messages", null],
-      ["env", "env"],
-      ["mcp", null],
-      ["tts", null],
-      ["broadcast", "broadcast"],
-      ["models", "models"],
-    ]) {
-      expect(configSelectionFromSearch("advanced", `?section=${section}`)).toEqual({
-        activeSection,
-        activeSubsection: null,
-      });
-    }
+    const sections = ["messages", "env", "mcp", "tts", "broadcast", "models"];
+    const actual = sections.map((section) =>
+      configSelectionFromSearch("advanced", `?section=${section}`),
+    );
+    const expected = [null, "env", null, null, "broadcast", "models"].map((activeSection) => ({
+      activeSection,
+      activeSubsection: null,
+    }));
+    expect(actual).toEqual(expected);
   });
   it("rejects an unsupported runtime page id", () => {
     expect(() => configSelectionFromSearch("__proto__" as ConfigPageId, "")).toThrow(
@@ -101,137 +98,122 @@ describe("ConfigPage navigation", () => {
             tts: fieldSchema("provider", "string"),
           }),
           configForm: config,
-          configFormOriginal: config,
-          configRaw: JSON.stringify(config),
-          configRawOriginal: JSON.stringify(config),
         },
       },
     } as unknown as ApplicationContext);
   }
 
-  describe("ConfigPage route selections", () => {
-    it.each([
-      { pageId: "communications", section: "transcripts" },
-      { pageId: "ai-agents", section: "session" },
-    ] as const)(
-      "opens the $section advanced editor for a matching hash",
-      async ({ pageId, section }) => {
-        const context = routeContext();
-        const config = { [section]: { enabled: true } };
-        Object.assign(context.runtimeConfig.state, {
-          configForm: config,
-          configSchema: objectSchema({ [section]: fieldSchema("enabled", "boolean") }),
-        });
-        const routeData = configRouteData({
-          pathname: `/settings/${pageId}`,
-          search: `?section=${section}`,
-          hash: "",
-        });
-        const view = mountConfigPage(context, { pageId, routeData });
-        const editor = view.container.querySelector(`#config-section-${section}`)!;
-        const disclosure = editor.closest("details")!;
-        expect(disclosure.open).toBe(false);
-        view.update({
-          routeData: {
-            ...routeData,
-            hash: `#config-section-${section}`,
-            targetBlockId: `config-section-${section}`,
-          },
-        });
-        await waitForSolid(() => expect(disclosure.open).toBe(true));
-        expect(view.container.querySelector(`#config-section-${section}`)).toBe(editor);
-      },
-    );
-
-    it.each([
-      { profile: undefined, writes: 1 },
-      { profile: "full", writes: 0 },
-    ])("Security Full preserves an explicit choice from $profile", async ({ profile, writes }) => {
+  it.each([
+    { pageId: "communications", section: "transcripts" },
+    { pageId: "ai-agents", section: "session" },
+  ] as const)(
+    "opens the $section advanced editor for a matching hash",
+    async ({ pageId, section }) => {
       const context = routeContext();
-      const patchForm = vi.fn();
-      const removeFormValue = vi.fn();
-      Object.assign(context.gateway.snapshot, {
-        phase: "connected",
-        hello: gatewayHelloForMethods(["config.set"]),
-      });
-      Object.assign(context.runtimeConfig, { canSet: true, patchForm, removeFormValue });
+      const config = { [section]: { enabled: true } };
       Object.assign(context.runtimeConfig.state, {
-        connected: true,
-        configForm: profile ? { tools: { profile } } : {},
+        configForm: config,
+        configSchema: objectSchema({ [section]: fieldSchema("enabled", "boolean") }),
       });
-      const { page } = mountConfigPage(context, { pageId: "security" });
+      const routeData = configRouteData({
+        pathname: `/settings/${pageId}`,
+        search: `?section=${section}`,
+        hash: "",
+      });
+      const view = mountConfigPage(context, { pageId, routeData });
+      const editor = view.container.querySelector(`#config-section-${section}`)!;
+      const disclosure = editor.closest("details")!;
+      expect(disclosure.open).toBe(false);
+      view.update({
+        routeData: {
+          ...routeData,
+          hash: `#config-section-${section}`,
+          targetBlockId: `config-section-${section}`,
+        },
+      });
+      await waitForSolid(() => expect(disclosure.open).toBe(true));
+      expect(view.container.querySelector(`#config-section-${section}`)).toBe(editor);
+    },
+  );
 
-      expect(patchForm).not.toHaveBeenCalled();
-      expect(removeFormValue).not.toHaveBeenCalled();
-      const full = query<HTMLInputElement>(page, '.settings-segmented__input[value="full"]');
-      expect(page.querySelectorAll(".settings-segmented__input")).toHaveLength(4);
-      expect(page.querySelectorAll(".settings-segmented__btn--active")).toHaveLength(
-        profile ? 1 : 0,
-      );
-      full.click();
-      expect(patchForm).toHaveBeenCalledTimes(writes);
-      if (writes > 0) {
-        expect(patchForm).toHaveBeenCalledWith(["tools", "profile"], "full");
-      }
-      expect(removeFormValue).not.toHaveBeenCalled();
+  it.each([
+    { profile: undefined, writes: 1 },
+    { profile: "full", writes: 0 },
+  ])("Security Full preserves an explicit choice from $profile", async ({ profile, writes }) => {
+    const context = routeContext();
+    const patchForm = vi.fn();
+    const removeFormValue = vi.fn();
+    Object.assign(context.gateway.snapshot, {
+      phase: "connected",
+      hello: gatewayHelloForMethods(["config.set"]),
     });
+    Object.assign(context.runtimeConfig, { canSet: true, patchForm, removeFormValue });
+    Object.assign(context.runtimeConfig.state, {
+      connected: true,
+      configForm: profile ? { tools: { profile } } : {},
+    });
+    const { page } = mountConfigPage(context, { pageId: "security" });
 
-    it.each([
-      ["communications", "?section=tts", "config-section-tts", "config-section-messages"],
-      ["notifications", "", "settings-communications-notifications", "config-section-messages"],
-    ] as const)(
-      "renders the selected section for %s%s",
-      async (pageId, search, visibleId, absentId) => {
-        const route = expectDefined(
-          pages.find((entry) => entry.id === pageId),
-          "config route",
-        );
-        const context = routeContext();
-        const location = { pathname: `/settings/${pageId}`, search, hash: "" };
-        const data = await route.loader?.(context, {
-          location,
-          signal: new AbortController().signal,
-          shouldRun: () => true,
-          revalidating: false,
-          deps: expectDefined(route.loaderDeps, "config route dependencies")(context, location),
-          cause: "navigation",
-        });
-        if (!data || typeof data !== "object" || !("section" in data)) {
-          throw new Error("Config route did not return section data");
-        }
-        expect(data).toMatchObject({ pageId });
-        const module = await route.component();
-        const provider = createSolidApplicationContextProvider(completeConfigContext(context));
-        const render = expectDefined(module.renderSolid, "Solid config route");
-        const { container } = mountSolid(
-          () =>
-            render({ data: data as ConfigPageRouteData, loaderPending: false, presented: true }),
-          { wrapper: provider.wrapper },
-        );
-        const page = query(container, "openclaw-config-page");
-        flush();
+    expect(patchForm).not.toHaveBeenCalled();
+    expect(removeFormValue).not.toHaveBeenCalled();
+    const full = query<HTMLInputElement>(page, '.settings-segmented__input[value="full"]');
+    expect(page.querySelectorAll(".settings-segmented__input")).toHaveLength(4);
+    expect(page.querySelectorAll(".settings-segmented__btn--active")).toHaveLength(profile ? 1 : 0);
+    full.click();
+    expect(patchForm).toHaveBeenCalledTimes(writes);
+    if (writes > 0) {
+      expect(patchForm).toHaveBeenCalledWith(["tools", "profile"], "full");
+    }
+    expect(removeFormValue).not.toHaveBeenCalled();
+  });
 
-        await waitForSolid(() => expect(page.querySelector(`#${visibleId}`)).not.toBeNull());
-        expect(page.querySelector(`#${absentId}`)).toBeNull();
-        if (pageId === "communications") {
-          expect(page.querySelector('.hub-tab[aria-selected="true"]')?.textContent?.trim()).toBe(
-            search ? "Voice" : "Messages",
-          );
-        }
-      },
+  it.each([
+    ["communications", "?section=tts", "config-section-tts"],
+    ["notifications", "", "settings-communications-notifications"],
+  ] as const)("renders the selected section for %s%s", async (pageId, search, visibleId) => {
+    const route = expectDefined(
+      pages.find((entry) => entry.id === pageId),
+      "config route",
     );
+    const context = routeContext();
+    const location = { pathname: `/settings/${pageId}`, search, hash: "" };
+    const data = await route.loader?.(context, {
+      location,
+      signal: new AbortController().signal,
+      shouldRun: () => true,
+      revalidating: false,
+      deps: expectDefined(route.loaderDeps, "config route dependencies")(context, location),
+      cause: "navigation",
+    });
+    if (!data || typeof data !== "object" || !("section" in data)) {
+      throw new Error("Config route did not return section data");
+    }
+    expect(data).toMatchObject({ pageId });
+    const module = await route.component();
+    const provider = createSolidApplicationContextProvider(completeConfigContext(context));
+    const render = expectDefined(module.renderSolid, "Solid config route");
+    const { container } = mountSolid(
+      () => render({ data: data as ConfigPageRouteData, loaderPending: false, presented: true }),
+      { wrapper: provider.wrapper },
+    );
+    const page = query(container, "openclaw-config-page");
+    flush();
+
+    await waitForSolid(() => expect(page.querySelector(`#${visibleId}`)).not.toBeNull());
+    expect(page.querySelector("#config-section-messages")).toBeNull();
+    if (pageId === "communications") {
+      expect(page.querySelector('.hub-tab[aria-selected="true"]')?.textContent?.trim()).toBe(
+        "Voice",
+      );
+    }
   });
 
   it("keeps the config owner through a pending subpage loader in the real outlet", async () => {
     const context = completeConfigContext(routeContext());
     const configPages = pages.filter((route) => route.id !== "settings" && route.id !== "config");
-    const findRoute = (id: string) =>
-      expectDefined(
-        configPages.find((route) => route.id === id),
-        id,
-      );
-    const communications = findRoute("communications");
-    const advanced = findRoute("advanced");
+    const findRoute = (id: string) => configPages.find((route) => route.id === id);
+    const communications = expectDefined(findRoute("communications"), "communications route");
+    const advanced = expectDefined(findRoute("advanced"), "advanced route");
     const loadAdvanced = expectDefined(advanced.loader, "advanced loader");
     const releaseAdvanced = deferred();
     const provider = createSolidApplicationContextProvider(context);
@@ -274,9 +256,7 @@ describe("ConfigPage navigation", () => {
         {},
         { pathname: "/settings/communications", search: "?section=tts", hash: "" },
       );
-      await waitForSolid(() => {
-        expect(mounted.querySelector("#config-section-tts")).not.toBeNull();
-      });
+      await waitForSolid(() => expect(mounted.querySelector("#config-section-tts")).not.toBeNull());
       const host = query(mounted, "openclaw-config-page");
       const title = () => host.querySelector(".content-header--settings .page-title")?.textContent;
       expect(title()).toBe("Communications");
@@ -380,21 +360,8 @@ describe("ConfigPage model catalog lifecycle", () => {
       runtimeConfig: { state: { configSnapshot: {}, configSchema: {} } },
     } as unknown as ApplicationContext;
     const view = mountConfigPage(context, { pageId: "appearance" });
-    await waitForSolid(() =>
-      expect(
-        view.page.querySelector("#settings-appearance-sidebar openclaw-select-picker"),
-      ).not.toBeNull(),
-    );
+    await waitForSolid(() => expect(view.page.querySelector(observerPicker)).not.toBeNull());
     return { view, source, context };
-  }
-
-  function observerModels(view: ReturnType<typeof mountConfigPage>) {
-    const picker = query<
-      HTMLElement & {
-        params: { options: Array<{ value: string; label: string }> };
-      }
-    >(view.page, "#settings-appearance-sidebar openclaw-select-picker");
-    return picker.params.options.slice(2).map(({ value, label }) => ({ value, label }));
   }
 
   function expectModels(
@@ -405,7 +372,10 @@ describe("ConfigPage model catalog lifecycle", () => {
       value: `${model.provider}/${model.id}`,
       label: model.name,
     }));
-    return waitForSolid(() => expect(observerModels(view)).toEqual(expected));
+    return waitForSolid(() => {
+      const actual = query<ModelPicker>(view.page, observerPicker).params.options;
+      expect(actual.slice(2).map(({ value, label }) => ({ value, label }))).toEqual(expected);
+    });
   }
 
   function statusReads(request: { mock: { calls: Array<[string, ...unknown[]]> } }) {
@@ -492,12 +462,10 @@ describe("ConfigPage model catalog lifecycle", () => {
       flush();
       const currentModels = catalogModels("small", "Small");
       second.resolve({ models: currentModels });
-      flush();
       await expectModels(view, currentModels);
 
       first.resolve({ models: catalogModels("stale", "Stale", "old") });
       await first.promise;
-      flush();
       await expectModels(view, currentModels);
       expect(modelCatalogStore.loadModelCatalog).toHaveBeenCalledTimes(2);
       for (const [index, client] of [firstClient, secondClient].entries()) {
@@ -534,7 +502,6 @@ describe("ConfigPage model catalog lifecycle", () => {
     publishConfigSource(context.settingsAgentSelection);
     const writerModels = catalogModels("writer-model", "Writer Model");
     writer.resolve({ models: writerModels });
-    flush();
     await expectModels(view, writerModels);
 
     selection.selectedId = "main";
@@ -547,7 +514,6 @@ describe("ConfigPage model catalog lifecycle", () => {
     expect(mainRequests).toBe(2);
     await expectModels(view);
     secondMain.resolve({ models: currentMainModels });
-    flush();
     await expectModels(view, currentMainModels);
     expect(request.mock.calls.filter(([method]) => method === "models.list")).toEqual(
       ["main", "writer", "main"].map((agentId) => [
@@ -599,7 +565,6 @@ describe("ConfigPage model catalog lifecycle", () => {
     await waitForSolid(() => expect(catalogReads).toBe(3));
     await expectModels(remounted, fresh);
     stale.resolve({ models: original });
-    flush();
     await expectModels(remounted, fresh);
     expect(catalogReads).toBe(3);
   });
@@ -617,94 +582,81 @@ describe("ConfigPage model catalog lifecycle", () => {
   });
 });
 
-describe("ConfigPage meeting capture", () => {
-  it("keeps Messages default and opens capture with a collapsed schema editor inside the section panel", async () => {
-    const config = { messages: { ackReaction: "ok" }, transcripts: { enabled: true } };
-    const request = vi.fn(async (method: string) => {
-      if (method === "transcripts.status") {
-        return meetingStatus;
-      }
-      if (method === "config.schema") {
-        return {
-          schema: objectSchema({
-            messages: fieldSchema("ackReaction", "string"),
-            tts: fieldSchema("enabled", "boolean"),
-            transcripts: fieldSchema("enabled", "boolean"),
-          }),
-          uiHints: {},
-        };
-      }
-      return {
-        config,
-        hash: "one",
-        appliedConfigHash: "one",
-        raw: JSON.stringify(config),
-        valid: true,
-        issues: [],
-      };
-    });
-    const { gateway } = createGatewayHarness({ request } as unknown as GatewayBrowserClient);
-    const runtimeConfig = createRuntimeConfigCapability(gateway);
-    try {
-      await runtimeConfig.ensureLoaded();
-      await runtimeConfig.ensureSchemaLoaded();
-      const context = {
-        gateway: { ...gateway, connection: { gatewayUrl: "ws://transcripts.test" } },
-        runtimeConfig,
-        navigate: vi.fn(),
-        overlays: { snapshot: { updateRunning: false, updateReconciliationPending: false } },
-      } as unknown as ApplicationContext;
-      const view = mountConfigPage(context, { pageId: "communications" });
-      const { container } = view;
-      const captureSettings = () => container.querySelector("openclaw-meeting-capture-settings");
-      const tab = (name: string) => query(container, `.hub-tab[data-tab-value="${name}"]`);
-      const enter = (element: HTMLElement) =>
-        element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      expect(captureSettings()).toBeNull();
-      const captureTab = tab("transcripts");
-      expect(captureTab.textContent?.trim()).toBe("Meeting capture");
-      const tabs = captureTab.closest(".hub-tabs")!;
-      expect(tabs.querySelector("[active]")?.getAttribute("data-tab-value")).toBe("messages");
-      enter(captureTab);
-      flush();
-      const capture = query(container, "openclaw-meeting-capture-settings");
-      expect(container.querySelector("#config-section-panel")?.contains(capture)).toBe(true);
-      flush();
-      const advanced = query<HTMLDetailsElement>(capture, "details");
-      expect(advanced.open).toBe(false);
-      expect(advanced.querySelector("#config-section-transcripts")).not.toBeNull();
-      const toggle = query<HTMLInputElement>(capture, ".settings-toggle__input");
-      toggle.checked = false;
-      toggle.dispatchEvent(new Event("change"));
-      expect(runtimeConfig.state.configForm).toMatchObject({ transcripts: { enabled: false } });
-      expect(
-        [...capture.querySelectorAll("button")].some(
-          (button) => button.textContent?.trim() === "Save",
-        ),
-      ).toBe(false);
-      const advancedToggled = new Promise<void>((resolve) => {
-        advanced.addEventListener("toggle", () => resolve(), { once: true });
-      });
-      view.update({
-        routeData: communicationsRoute(
-          "?section=transcripts&advanced=1",
-          "#config-section-transcripts",
-        ),
-      });
-      await waitForSolid(() => expect(advanced.open).toBe(true));
-      expect(captureSettings()).toBe(capture);
-      expect(capture.querySelector("details")).toBe(advanced);
-      await advancedToggled;
-      const messagesTab = tab("messages");
-      messagesTab.focus();
-      enter(messagesTab);
-      flush();
-      expect(captureSettings()).toBeNull();
-      flush();
-      expect(document.activeElement).toBe(messagesTab);
-    } finally {
-      cleanupSolid();
-      runtimeConfig.dispose();
+it("keeps Messages default and opens capture with a collapsed schema editor inside the section panel", async () => {
+  const config = { transcripts: { enabled: true } };
+  const request = vi.fn(async (method: string) => {
+    if (method === "transcripts.status") {
+      return meetingStatus;
     }
+    if (method === "config.schema") {
+      return {
+        schema: objectSchema({ transcripts: fieldSchema("enabled", "boolean") }),
+        uiHints: {},
+      };
+    }
+    return {
+      config,
+      hash: "one",
+      appliedConfigHash: "one",
+      raw: JSON.stringify(config),
+      valid: true,
+      issues: [],
+    };
   });
+  const { gateway } = createGatewayHarness({ request } as unknown as GatewayBrowserClient);
+  const runtimeConfig = createRuntimeConfigCapability(gateway);
+  try {
+    await runtimeConfig.ensureLoaded();
+    await runtimeConfig.ensureSchemaLoaded();
+    const context = {
+      gateway: { ...gateway, connection: { gatewayUrl: "ws://transcripts.test" } },
+      runtimeConfig,
+    } as unknown as ApplicationContext;
+    const view = mountConfigPage(context, { pageId: "communications" });
+    const { container } = view;
+    const captureSettings = () => container.querySelector("openclaw-meeting-capture-settings");
+    const tab = (name: string) => query(container, `.hub-tab[data-tab-value="${name}"]`);
+    const enter = (element: HTMLElement) =>
+      element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(captureSettings()).toBeNull();
+    const captureTab = tab("transcripts");
+    expect(captureTab.textContent?.trim()).toBe("Meeting capture");
+    const tabs = captureTab.closest(".hub-tabs")!;
+    expect(tabs.querySelector("[active]")?.getAttribute("data-tab-value")).toBe("messages");
+    enter(captureTab);
+    flush();
+    const capture = query(container, "openclaw-meeting-capture-settings");
+    expect(container.querySelector("#config-section-panel")?.contains(capture)).toBe(true);
+    const advanced = query<HTMLDetailsElement>(capture, "details");
+    expect(advanced.open).toBe(false);
+    expect(advanced.querySelector("#config-section-transcripts")).not.toBeNull();
+    const toggle = query<HTMLInputElement>(capture, ".settings-toggle__input");
+    toggle.checked = false;
+    toggle.dispatchEvent(new Event("change"));
+    expect(runtimeConfig.state.configForm).toMatchObject({ transcripts: { enabled: false } });
+    const buttons = [...capture.querySelectorAll("button")];
+    expect(buttons.some((button) => button.textContent?.trim() === "Save")).toBe(false);
+    const advancedToggled = new Promise<void>((resolve) => {
+      advanced.addEventListener("toggle", () => resolve(), { once: true });
+    });
+    view.update({
+      routeData: communicationsRoute(
+        "?section=transcripts&advanced=1",
+        "#config-section-transcripts",
+      ),
+    });
+    await waitForSolid(() => expect(advanced.open).toBe(true));
+    expect(captureSettings()).toBe(capture);
+    expect(capture.querySelector("details")).toBe(advanced);
+    await advancedToggled;
+    const messagesTab = tab("messages");
+    messagesTab.focus();
+    enter(messagesTab);
+    flush();
+    expect(captureSettings()).toBeNull();
+    expect(document.activeElement).toBe(messagesTab);
+  } finally {
+    cleanupSolid();
+    runtimeConfig.dispose();
+  }
 });

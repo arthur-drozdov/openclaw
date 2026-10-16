@@ -13,7 +13,7 @@ type Request = (method: string, params: Record<string, unknown>) => Promise<unkn
 function createElement(request: Request, advertised = true) {
   const [agentId, setAgentId] = createSignal<string | null>("main");
   const client = { request } as unknown as GatewayBrowserClient;
-  const { container, unmount } = mountSolid(() => (
+  const { container } = mountSolid(() => (
     <MemoryMemories
       client={client}
       connected={true}
@@ -22,7 +22,7 @@ function createElement(request: Request, advertised = true) {
     />
   ));
   flush();
-  return Object.assign(container, { setAgentId, unmount });
+  return Object.assign(container, { setAgentId });
 }
 
 function typeQuery(element: HTMLElement, query: string) {
@@ -72,22 +72,20 @@ function memoryFileResponse(content: string) {
 }
 
 describe("MemoryMemoriesElement", () => {
-  it("renders idle and gateway-update-required states", () => {
-    const current = createElement(vi.fn(() => Promise.resolve({})));
-    flush();
-    expect(current.textContent).toContain("Search for a person, project, decision");
-    expect(current.querySelector("form")).not.toBeNull();
-    current.unmount();
-
-    const old = createElement(
-      vi.fn(() => Promise.resolve({})),
-      false,
-    );
-    flush();
-    expect(old.textContent).toContain("Update the gateway to search memories");
-    expect(old.querySelector("form")).toBeNull();
-    old.unmount();
-  });
+  it.each([
+    [true, "Search for a person, project, decision"],
+    [false, "Update the gateway to search memories"],
+  ] satisfies [boolean, string][])(
+    "renders the advertised=%s search state",
+    (advertised, message) => {
+      const element = createElement(
+        vi.fn(() => Promise.resolve({})),
+        advertised,
+      );
+      expect(element.textContent).toContain(message);
+      expect(element.querySelector("form") === null).toBe(!advertised);
+    },
+  );
 
   it("keeps search disabled when no agent is available", async () => {
     const request = vi.fn(() => Promise.resolve({}));
