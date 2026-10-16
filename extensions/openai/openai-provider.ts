@@ -37,6 +37,7 @@ import {
   resolveOpenAIDefaultBaseUrl,
 } from "./base-url.js";
 import {
+  normalizeOpenAICodexCatalogModel,
   readCodexReasoningLevels,
   readCodexModelRows,
   shouldIncludeCodexModelRow,
@@ -69,7 +70,6 @@ import {
   isOpenAIPlatformOnlyRouteModelId,
   isOpenAISubscriptionOnlyRouteModelId,
   normalizeOpenAIModelRouteId,
-  resolveOpenAICodexReasoningEfforts,
 } from "./model-route-contract.js";
 import {
   buildOpenAICodexReadyOutcome,
@@ -100,7 +100,6 @@ const PROVIDER_ID = "openai";
 const OPENAI_MODELS_ENDPOINT = "https://api.openai.com/v1/models";
 const OPENAI_MODELS_CACHE_TTL_MS = 60_000;
 const OPENAI_CODEX_MODELS_CACHE_TTL_MS = 60_000;
-const OPENAI_CODEX_GPT_56_CONTEXT_WINDOW = 372_000;
 const OPENAI_GPT_54_MAX_TOKENS = 128_000;
 const OPENAI_CHAT_LATEST_COST = { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 } as const;
 const OPENAI_CATALOG_AUGMENTATIONS = [
@@ -248,35 +247,6 @@ async function buildOpenAILiveProviderConfig(
     }
     return { provider: fallback, outcome: { provider: PROVIDER_ID, status: "unavailable" } };
   }
-}
-
-function normalizeOpenAICodexCatalogModel(model: ModelDefinitionConfig): ModelDefinitionConfig {
-  const modelId = normalizeLowercaseStringOrEmpty(model.id);
-  if (
-    modelId === OPENAI_GPT_56_SOL_MODEL_ID ||
-    modelId === OPENAI_GPT_56_TERRA_MODEL_ID ||
-    modelId === OPENAI_GPT_56_LUNA_MODEL_ID
-  ) {
-    const supportedReasoningEfforts = resolveOpenAICodexReasoningEfforts(
-      modelId,
-      model.compat?.supportedReasoningEfforts?.filter((effort) => effort !== "none"),
-    );
-    return {
-      ...model,
-      contextWindow: OPENAI_CODEX_GPT_56_CONTEXT_WINDOW,
-      contextTokens: OPENAI_DEFAULT_RUNTIME_CONTEXT_TOKENS,
-      thinkingLevelMap: { ...model.thinkingLevelMap, off: null },
-      ...(model.compat
-        ? {
-            compat: {
-              ...model.compat,
-              ...(supportedReasoningEfforts ? { supportedReasoningEfforts } : {}),
-            },
-          }
-        : {}),
-    };
-  }
-  return model;
 }
 
 function resolveCodexModelFallback(modelId: string): ModelDefinitionConfig | undefined {
