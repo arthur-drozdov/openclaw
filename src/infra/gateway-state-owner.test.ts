@@ -603,7 +603,7 @@ describe("Gateway state ownership", () => {
     },
   );
 
-  it.each(["foreign", "matching PID", "dead PID"] as const)(
+  it.each(["foreign", "matching PID", "dead PID", "dead launcher"] as const)(
     "checks %s persisted ownership without borrowing its authority",
     async (kind) => {
       await withTempDir("openclaw-state-access-", async (root) => {
@@ -614,13 +614,15 @@ describe("Gateway state ownership", () => {
         owner.release();
         const deadPid = process.pid + 1;
         const record = {
-          pid: kind === "dead PID" ? deadPid : process.ppid,
+          pid:
+            kind === "dead PID" ? deadPid : kind === "dead launcher" ? process.pid : process.ppid,
+          ...(kind === "dead launcher" ? { parentPid: deadPid } : {}),
           createdAt: new Date().toISOString(),
           configPath: path.join(root, "openclaw.json"),
         };
         const kill = process.kill.bind(process);
         const probe =
-          kind === "dead PID"
+          kind === "dead PID" || kind === "dead launcher"
             ? vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
                 if (pid === deadPid && signal === 0) {
                   throw Object.assign(new Error("No such process"), { code: "ESRCH" });
@@ -637,11 +639,25 @@ describe("Gateway state ownership", () => {
             expect(() => acquireStateDatabaseSchemaLease(databasePath)).toThrow(
               GatewayStateOwnerContentionError,
             );
+          } else if (kind === "dead launcher") {
+            fs.writeFileSync(pathname, JSON.stringify({ ...record, role: "sqlite-maintenance" }));
+            expect(() => assertStateDatabaseAccessAllowed(databasePath)).toThrow(
+              "lost its launcher",
+            );
+            fs.writeFileSync(
+              pathname,
+              JSON.stringify({ ...record, pid: process.ppid, role: "sqlite-maintenance" }),
+            );
+            expect(() => acquireGatewayStateOwner({ databasePath })).toThrow(
+              GatewayStateOwnerContentionError,
+            );
           } else if (kind === "dead PID") {
             const raw = JSON.stringify({ ...record, role: "sqlite-maintenance" });
             fs.writeFileSync(pathname, raw);
             expect(() => assertStateDatabaseAccessAllowed(databasePath)).not.toThrow();
             expect(fs.readFileSync(pathname, "utf8")).toBe(raw);
+            const recovered = acquireGatewayStateOwner({ databasePath });
+            recovered.release();
           } else {
             for (const role of [undefined, "gateway", "agent-embedded"] as const) {
               fs.writeFileSync(pathname, JSON.stringify({ ...record, role }));

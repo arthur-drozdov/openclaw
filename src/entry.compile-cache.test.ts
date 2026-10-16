@@ -241,7 +241,7 @@ describe("entry compile cache", () => {
       expect(options?.env?.NODE_DISABLE_COMPILE_CACHE).toBe("1");
       expect(options?.env?.OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED).toBe("1");
       expect(options?.env?.NODE_COMPILE_CACHE).toBeUndefined();
-      expect(options?.stdio).toBe("inherit");
+      expect(options?.stdio).toEqual(["inherit", "inherit", "inherit", "ipc"]);
       expect(options?.detached).toBe(
         process.platform !== "win32" && !(process.stdin.isTTY || process.stdout.isTTY),
       );

@@ -861,7 +861,7 @@ describe("runtime recovery discovery", () => {
           candidate,
           ["--trace-warnings", "/fixture/dist/index.js", "doctor", "--non-interactive", "--fix"],
           {
-            stdio: "inherit",
+            stdio: ["inherit", "inherit", "inherit", "ipc"],
             env: { ...originalEnv, OPENCLAW_NODE_UPDATE_RESPAWNED: "1" },
             windowsHide: hide,
           },

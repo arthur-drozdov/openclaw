@@ -5,6 +5,7 @@ import * as nodeSqlite from "../../infra/node-sqlite.js";
 import { pkgQueryResult } from "../../infra/update-freebsd-pkg-ownership.test-support.js";
 import { getUpdateRun } from "../../infra/update-run-ledger.js";
 import * as exec from "../../process/exec.js";
+import * as pidAlive from "../../shared/pid-alive.js";
 import { withMockedPlatform } from "../../test-utils/vitest-spies.js";
 import {
   adoptUpdateCampaignMock,
@@ -19,11 +20,16 @@ import {
 const sqliteHostPlatform = process.platform;
 const existingHostUri = nodeSqlite.resolveExistingSqliteFileUri;
 const immutableHostUri = nodeSqlite.resolveImmutableSqliteFileUri;
+const readProcessStartTime = pidAlive.getFileLockProcessStartTime;
+const parentStartTime = readProcessStartTime(process.ppid);
 
 beforeEach(() => {
   // Platform simulation must not change the real process identity shared with SQLite workers.
   const namespace = gatewayLockPayload.readGatewayLockProcessNamespace();
   vi.spyOn(gatewayLockPayload, "readGatewayLockProcessNamespace").mockReturnValue(namespace);
+  vi.spyOn(pidAlive, "getFileLockProcessStartTime").mockImplementation((pid, ...args) =>
+    pid === process.ppid ? parentStartTime : readProcessStartTime(pid, ...args),
+  );
 });
 
 afterEach(() => vi.restoreAllMocks());

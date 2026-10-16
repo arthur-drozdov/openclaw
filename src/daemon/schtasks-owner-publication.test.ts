@@ -67,6 +67,8 @@ const GATEWAY_OWNER: GatewayOwnerLeaseIdentity = {
   state: "live",
   expired: false,
 };
+const readProcessStartTime = pidAlive.getFileLockProcessStartTime;
+const parentStartTime = readProcessStartTime(process.ppid);
 
 async function withPreparedGatewayTask(
   run: (params: { env: Record<string, string> }) => Promise<void>,
@@ -103,6 +105,10 @@ beforeEach(() => {
   readWindowsProcessStartTime.mockReset().mockReturnValue(null);
   spawnSync.mockReset();
   timeState.now = 0;
+  // Keep real worker parent identity separate from simulated Windows process identities.
+  vi.spyOn(pidAlive, "getFileLockProcessStartTime").mockImplementation((pid, ...args) =>
+    pid === process.ppid ? parentStartTime : readProcessStartTime(pid, ...args),
+  );
   vi.spyOn(Date, "now").mockImplementation(() => timeState.now);
 });
 afterEach(() => {

@@ -2,10 +2,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { collectNestedErrorCandidates } from "@openclaw/normalization-core/error-coercion";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveDoctorUpdateAdmission } from "../commands/doctor-maintenance-admission.js";
 import { GATEWAY_SERVICE_STOP_TIMEOUT_MS } from "../infra/gateway-shutdown-budget.js";
 import * as gatewayStateOwner from "../infra/gateway-state-owner.js";
+import * as pidAlive from "../shared/pid-alive.js";
 import { getOpenClawDatabaseMaintenanceScope } from "../state/openclaw-state-db-async-lifecycle.js";
 import {
   closeOpenClawStateDatabaseForTest,
@@ -47,6 +48,15 @@ import {
   schtasksCalls,
   schtasksResponses,
 } from "./test-helpers/schtasks-fixtures.js";
+
+const readProcessStartTime = pidAlive.getFileLockProcessStartTime;
+const parentStartTime = readProcessStartTime(process.ppid);
+beforeEach(() => {
+  // The heartbeat remains a real host worker while the task adapter simulates Windows.
+  vi.spyOn(pidAlive, "getFileLockProcessStartTime").mockImplementation((pid, ...args) =>
+    pid === process.ppid ? parentStartTime : readProcessStartTime(pid, ...args),
+  );
+});
 
 type GatewayFixture = Parameters<Parameters<typeof withPreparedGatewayTask>[0]>[0];
 const taskTest = it.extend<GatewayFixture & { gateway: GatewayFixture }>({

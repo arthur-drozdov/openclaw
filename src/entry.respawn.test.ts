@@ -251,7 +251,7 @@ describe("runCliRespawnPlan", () => {
       "/usr/bin/node",
       ["/repo/openclaw/dist/entry.js", "status"],
       {
-        stdio: "inherit",
+        stdio: ["inherit", "inherit", "inherit", "ipc"],
         env: { OPENCLAW_NODE_OPTIONS_READY: "1" },
         detached: process.platform !== "win32" && !(process.stdin.isTTY || process.stdout.isTTY),
         windowsHide: !(process.stdin.isTTY || process.stdout.isTTY),

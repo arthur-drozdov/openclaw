@@ -18,6 +18,21 @@ import {
 } from "./node-sqlite.mjs";
 
 export { consumeLauncherRootOptionToken };
+
+let watchingParent = false;
+/** A respawn is part of its launcher, including when SIGKILL cannot be forwarded. */
+export function watchCliRespawnParent() {
+  if (!process.channel || watchingParent) {
+    return;
+  }
+  watchingParent = true;
+  const terminate = () => process.kill(process.pid, "SIGKILL");
+  process.once("disconnect", terminate);
+  process.channel.unref();
+  if (!process.connected) {
+    terminate();
+  }
+}
 export const isNativeHookRelayInvocation = (argv) => argv[2] === "hooks" && argv[3] === "relay";
 
 // Mirror the entry's foreground Gmail policy: a wrapper would kill that run before descendant cleanup finishes.
@@ -56,7 +71,7 @@ export const runRespawnedChild = (command, args, env) => {
   const signalExitGraceMs = launcherStopTimeoutMs - respawnSignalForceKillGraceMs;
   const stdioIsTerminal = process.stdin.isTTY || process.stdout.isTTY;
   const child = spawn(command, args, {
-    stdio: "inherit",
+    stdio: ["inherit", "inherit", "inherit", "ipc"],
     env,
     windowsHide: !stdioIsTerminal,
   });
