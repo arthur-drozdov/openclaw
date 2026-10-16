@@ -4,7 +4,6 @@ import type {
   AgentHarnessAttemptParamsV2,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import * as harnessRuntime from "openclaw/plugin-sdk/agent-harness-runtime";
-import { AuthStorage, ModelRegistry } from "openclaw/plugin-sdk/agent-sessions";
 import type { OpenClawConfig, OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
 import {
@@ -21,39 +20,27 @@ import {
   withNativeSessionMutationForTest,
 } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { vi } from "vitest";
+import { createAttemptParams } from "./agentsapi-attempt.test-helpers.js";
 import type { AgentsApiBinding } from "./agentsapi-bindings.js";
 import { AgentsApiClient } from "./agentsapi-client.js";
-import { createModel, createHostedSession } from "./agentsapi.test-support.js";
+import { createHostedSession } from "./agentsapi.test-support.js";
 import plugin from "./index.js";
 
 export function registerHarness(
   env: NodeJS.ProcessEnv,
   readConfig: () => OpenClawConfig = () => ({}),
 ) {
-  const runtime = createBindingRuntime(env, readConfig);
-  const registerAgentHarness = vi.fn<OpenClawPluginApi["registerAgentHarness"]>();
-  plugin.register(createTestPluginApi({ id: "agentsapi", runtime, registerAgentHarness }));
-  const harness = registerAgentHarness.mock.calls[0]?.[0];
-  if (!harness?.runAttempt || !harness.reset || !harness.dispose) {
-    throw new Error("The registered Agents API harness requires run, reset, and disposal");
-  }
-  return {
-    runAttempt: harness.runAttempt.bind(harness),
-    reset: harness.reset.bind(harness),
-    dispose: harness.dispose.bind(harness),
-  };
+  const { runAttempt, reset, dispose } = requireExecutorHarness(
+    createBindingRuntime(env, readConfig),
+  );
+  return { runAttempt, reset, dispose };
 }
 
 export async function executorFixture(state: { stateDir: string; env: NodeJS.ProcessEnv }) {
   const params = await createAttempt(state.stateDir);
+  const config = { environment: "self_hosted", executorController: "fixture-executor" };
   const runtime = createBindingRuntime(state.env, () => ({
-    plugins: {
-      entries: {
-        agentsapi: {
-          config: { environment: "self_hosted", executorController: "fixture-executor" },
-        },
-      },
-    },
+    plugins: { entries: { agentsapi: { config } } },
   }));
   const openStore = () =>
     createPluginStateKeyedStoreForTests<AgentsApiBinding>("agentsapi", {
@@ -96,17 +83,14 @@ export async function executorFixture(state: { stateDir: string; env: NodeJS.Pro
     },
     required_actions: [{ type: "environment_connection", environment_id: "executor-environment" }],
   };
-  const create = vi.spyOn(AgentsApiClient.prototype, "create").mockResolvedValue(nativeSession.id);
-  const session = vi.spyOn(AgentsApiClient.prototype, "session").mockResolvedValue(nativeSession);
+  const { create, session, message } = mockClient(nativeSession.id);
+  session.mockResolvedValue(nativeSession);
   const environment = vi
     .spyOn(AgentsApiClient.prototype, "environment")
     .mockResolvedValue(connectedEnvironment());
-  const message = vi.spyOn(AgentsApiClient.prototype, "message").mockResolvedValue(undefined);
   const cancel = vi.spyOn(AgentsApiClient.prototype, "cancel").mockImplementation(async () => {
     events.push("cancel");
   });
-  vi.spyOn(AgentsApiClient.prototype, "setReasoningEffort").mockResolvedValue(undefined);
-  vi.spyOn(AgentsApiClient.prototype, "items").mockResolvedValue([]);
   return {
     params,
     runtime,
@@ -201,8 +185,7 @@ export async function createAttempt(stateDir: string) {
     ...target,
     entry: { sessionId: target.sessionId, updatedAt: Date.now() },
   });
-  const authStorage = AuthStorage.inMemory();
-  return {
+  const identity = {
     ...target,
     sessionTarget: target,
     sessionFile: path.join(stateDir, "session.jsonl"),
@@ -212,23 +195,15 @@ export async function createAttempt(stateDir: string) {
     runId: "persisted-run",
     prompt: "Continue the retained conversation.",
     timeoutMs: 5_000,
-    provider: "openai",
-    modelId: "fixture-model",
-    model: createModel(),
     resolvedApiKey: "fixture-not-a-real-api-key",
-    authStorage,
-    modelRegistry: ModelRegistry.inMemory(authStorage),
-    authProfileStore: { version: 1, profiles: {} },
-    thinkLevel: "off",
+  };
+  const params = createAttemptParams(identity);
+  return {
+    ...params,
+    ...identity,
     hostCapabilities: {
-      kind: "agent-harness-host-capability",
-      version: 1,
-      assertActive: () => {},
+      ...params.hostCapabilities,
       createToolSurfaceAsync: async () => [],
-      bindToolSurface: (tools) => tools,
-      runBeforeToolCall: async (request) => ({ blocked: false, params: request.params }),
-      requestApproval: async () => undefined,
-      waitForApproval: async () => undefined,
     },
   } satisfies AgentHarnessAttemptParamsV2;
 }

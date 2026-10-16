@@ -33,7 +33,39 @@ function pluginConfig(config: Record<string, unknown>): OpenClawConfig {
   return { plugins: { entries: { agentsapi: { config } } } };
 }
 
-/** Reuses the registered harness, SQLite fixture, and deterministic native transport. */
+type MigrationFixture<T> = {
+  params: Awaited<ReturnType<typeof createAttempt>>;
+  store: ReturnType<typeof migrationStore<T>>;
+  client: ReturnType<typeof mockClient>;
+  harness: ReturnType<typeof registerHarness>;
+};
+
+async function withMigration<T = StoredBinding>(
+  label: string,
+  run: (fixture: MigrationFixture<T>) => Promise<void>,
+  readConfig: () => OpenClawConfig = () => ({}),
+) {
+  return withOpenClawTestState({ label }, async ({ stateDir, env }) => {
+    const fixture = {
+      params: await createAttempt(stateDir),
+      store: migrationStore<T>(env),
+      client: mockClient("must-not-create"),
+      harness: registerHarness(env, readConfig),
+    };
+    try {
+      await run(fixture);
+    } finally {
+      await fixture.harness.dispose();
+    }
+  });
+}
+
+function expectNoCalls(...mocks: unknown[]) {
+  for (const mock of mocks) {
+    expect(mock).not.toHaveBeenCalled();
+  }
+}
+
 export function registerMigrationTests(
   fetchMock: ReturnType<
     typeof vi.fn<typeof import("openclaw/plugin-sdk/ssrf-runtime").fetchWithSsrFGuard>
@@ -73,80 +105,47 @@ export function registerMigrationTests(
   });
 
   it("retains legacy state rather than guessing after credential or immutable policy changes", async () => {
-    await withOpenClawTestState({ label: "agentsapi-upgrade-policy" }, async (state) => {
-      const params = await createAttempt(state.stateDir);
-      const store = migrationStore(state.env);
-      await store.register(params.sessionId, legacy);
-      const client = mockClient("must-not-create");
-      let config: OpenClawConfig = {};
-      const harness = registerHarness(state.env, () => config);
-      const cases: Array<{
-        name: string;
-        config?: OpenClawConfig;
-        params?: Partial<AgentHarnessAttemptParamsV2>;
-      }> = [
-        { name: "rotated key", params: { resolvedApiKey: "fixture-rotated-key" } },
-        { name: "model", params: { model: { ...params.model, id: "different-model" } } },
-        { name: "environment", config: pluginConfig({ environment: "self_hosted" }) },
-        {
-          name: "network",
-          config: pluginConfig({ openai_host: { network: { access: "disabled" } } }),
-        },
-        {
-          name: "MCP",
-          params: {
-            config: {
-              mcp: {
-                servers: {
-                  changed: { transport: "streamable-http", url: "https://mcp.example.test" },
-                },
-              },
-            },
-          },
-        },
-        { name: "native search", params: { toolOverrides: { webSearch: false } } },
-        {
-          name: "Gateway forwarding",
-          config: pluginConfig({ forwarding: { gatewayTools: false } }),
-        },
-        {
-          name: "MCP forwarding",
-          config: pluginConfig({ forwarding: { mcpServers: false } }),
-        },
-      ];
-      try {
-        for (const entry of cases) {
-          config = entry.config ?? {};
-          await expect(harness.runAttempt({ ...params, ...entry.params })).rejects.toThrow(
+    let config: OpenClawConfig = {};
+    await withMigration(
+      "agentsapi-upgrade-policy",
+      async ({ params, store, client, harness }) => {
+        await store.register(params.sessionId, legacy);
+        const changed = { transport: "streamable-http" as const, url: "https://mcp.example.test" };
+        const cases: Array<[string, Partial<AgentHarnessAttemptParamsV2>, OpenClawConfig?]> = [
+          ["rotated key", { resolvedApiKey: "fixture-rotated-key" }],
+          ["model", { model: { ...params.model, id: "different-model" } }],
+          ["environment", {}, pluginConfig({ environment: "self_hosted" })],
+          ["network", {}, pluginConfig({ openai_host: { network: { access: "disabled" } } })],
+          ["MCP", { config: { mcp: { servers: { changed } } } }],
+          ["native search", { toolOverrides: { webSearch: false } }],
+          ["Gateway forwarding", {}, pluginConfig({ forwarding: { gatewayTools: false } })],
+          ["MCP forwarding", {}, pluginConfig({ forwarding: { mcpServers: false } })],
+        ];
+        for (const [name, overrides, nextConfig] of cases) {
+          config = nextConfig ?? {};
+          await expect(harness.runAttempt({ ...params, ...overrides })).rejects.toThrow(
             "restore the original configuration and API key",
           );
-          expect(await store.lookup(params.sessionId), entry.name).toEqual(legacy);
+          expect(await store.lookup(params.sessionId), name).toEqual(legacy);
         }
-        expect(client.session).not.toHaveBeenCalled();
-        expect(client.create).not.toHaveBeenCalled();
-        expect(client.update).not.toHaveBeenCalled();
-        expect(client.message).not.toHaveBeenCalled();
-      } finally {
-        await harness.dispose();
-      }
-    });
+        expectNoCalls(client.session, client.create, client.update, client.message);
+      },
+      () => config,
+    );
   });
 
   it("retains corrupt and partial binding rows before either resume or cleanup", async () => {
-    await withOpenClawTestState({ label: "agentsapi-upgrade-corrupt" }, async (state) => {
-      const params = await createAttempt(state.stateDir);
-      const store = migrationStore<unknown>(state.env);
-      const client = mockClient("must-not-create");
-      const harness = registerHarness(state.env);
-      const rows = [
-        { sessionId: legacy.sessionId },
-        { authFingerprint: legacy.authFingerprint },
-        { ...legacy, configFingerprint: "ambiguous" },
-        { ...legacy, authFingerprint: "not-a-digest" },
-        { ...legacy, lease: { token: "incomplete" } },
-        { ...legacy, unknown: "must-not-strip" },
-      ];
-      try {
+    await withMigration<unknown>(
+      "agentsapi-upgrade-corrupt",
+      async ({ params, client, harness, store }) => {
+        const rows = [
+          { sessionId: legacy.sessionId },
+          { authFingerprint: legacy.authFingerprint },
+          { ...legacy, configFingerprint: "ambiguous" },
+          { ...legacy, authFingerprint: "not-a-digest" },
+          { ...legacy, lease: { token: "incomplete" } },
+          { ...legacy, unknown: "must-not-strip" },
+        ];
         for (const row of rows) {
           await store.register(params.sessionId, row);
           await expect(harness.runAttempt(params)).rejects.toThrow(
@@ -157,155 +156,126 @@ export function registerMigrationTests(
           );
           expect(await store.lookup(params.sessionId)).toEqual(row);
         }
-        expect(client.session).not.toHaveBeenCalled();
-        expect(client.create).not.toHaveBeenCalled();
-        expect(client.message).not.toHaveBeenCalled();
-      } finally {
-        await harness.dispose();
-      }
-    });
+        expectNoCalls(client.session, client.create, client.message);
+      },
+    );
   });
 
   it("checks current-key SDK access before upgrading and retains failed admission for retry", async () => {
-    await withOpenClawTestState({ label: "agentsapi-upgrade-access" }, async (state) => {
-      const params = await createAttempt(state.stateDir);
-      const store = migrationStore(state.env);
+    await withMigration("agentsapi-upgrade-access", async ({ params, store, client, harness }) => {
       await store.register(params.sessionId, legacy);
-      const client = mockClient("must-not-create");
       client.session.mockRestore();
-      const harness = registerHarness(state.env);
-      try {
-        for (const status of [401, 403, 404, 500]) {
-          fetchMock.mockImplementationOnce(async ({ url, init }) => {
-            expect(url).toBe("https://api.openai.com/v1/agents/sessions/" + legacy.sessionId);
-            expect(new Headers(init?.headers).get("authorization")).toBe(
-              "Bearer " + params.resolvedApiKey,
-            );
-            return {
-              finalUrl: url,
-              response: Response.json(
-                { error: { message: "fixture access refused", type: "invalid_request_error" } },
-                { status },
-              ),
-              release: async () => {},
-            };
-          });
-          await expect(harness.runAttempt(params)).rejects.toThrow("fixture access refused");
-          expect(await store.lookup(params.sessionId)).toEqual(legacy);
-        }
-        fetchMock.mockImplementationOnce(async () => {
-          throw new TypeError("fixture transport unavailable");
+      for (const status of [401, 403, 404, 500]) {
+        fetchMock.mockImplementationOnce(async ({ url, init }) => {
+          expect(url).toBe("https://api.openai.com/v1/agents/sessions/" + legacy.sessionId);
+          expect(new Headers(init?.headers).get("authorization")).toBe(
+            "Bearer " + params.resolvedApiKey,
+          );
+          return {
+            finalUrl: url,
+            response: Response.json(
+              { error: { message: "fixture access refused", type: "invalid_request_error" } },
+              { status },
+            ),
+            release: async () => {},
+          };
         });
-        await expect(harness.runAttempt(params)).rejects.toThrow();
+        await expect(harness.runAttempt(params)).rejects.toThrow("fixture access refused");
         expect(await store.lookup(params.sessionId)).toEqual(legacy);
-        expect(client.create).not.toHaveBeenCalled();
-        expect(client.update).not.toHaveBeenCalled();
-        expect(client.message).not.toHaveBeenCalled();
-        fetchMock.mockImplementationOnce(async ({ url }) => ({
-          finalUrl: url,
-          response: Response.json({ ...createHostedSession(), id: legacy.sessionId }),
-          release: async () => {},
-        }));
-        expect(await harness.runAttempt(params)).toMatchObject({ terminal: { kind: "ok" } });
-        expect(await store.lookup(params.sessionId)).toMatchObject({
-          sessionId: legacy.sessionId,
-          configFingerprint: expect.any(String),
-        });
-        expect(fetchMock).toHaveBeenCalledTimes(6);
-      } finally {
-        await harness.dispose();
       }
+      fetchMock.mockImplementationOnce(async () => {
+        throw new TypeError("fixture transport unavailable");
+      });
+      await expect(harness.runAttempt(params)).rejects.toThrow();
+      expect(await store.lookup(params.sessionId)).toEqual(legacy);
+      expectNoCalls(client.create, client.update, client.message);
+      fetchMock.mockImplementationOnce(async ({ url }) => ({
+        finalUrl: url,
+        response: Response.json({ ...createHostedSession(), id: legacy.sessionId }),
+        release: async () => {},
+      }));
+      expect(await harness.runAttempt(params)).toMatchObject({ terminal: { kind: "ok" } });
+      expect(await store.lookup(params.sessionId)).toMatchObject({
+        sessionId: legacy.sessionId,
+        configFingerprint: expect.any(String),
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(6);
     });
   });
 
   it("fences legacy migration when generation, lease, or source changes during access validation", async () => {
-    await withOpenClawTestState({ label: "agentsapi-upgrade-authority" }, async (state) => {
-      const params = await createAttempt(state.stateDir);
-      const store = migrationStore(state.env);
-      const client = mockClient("must-not-create");
-      let active = true;
-      params.hostCapabilities.assertActive = () => {
-        if (!active) {
-          throw new Error("fixture authority revoked");
-        }
-      };
-      const harness = registerHarness(state.env);
-      try {
-        for (const change of ["authority", "lease", "source"] as const) {
+    await withMigration(
+      "agentsapi-upgrade-authority",
+      async ({ params, store, client, harness }) => {
+        let active = true;
+        params.hostCapabilities.assertActive = () => {
+          if (!active) {
+            throw new Error("fixture authority revoked");
+          }
+        };
+        try {
+          for (const change of ["authority", "lease", "source"] as const) {
+            active = true;
+            await store.register(params.sessionId, legacy);
+            let expected: StoredBinding = legacy;
+            client.session.mockImplementationOnce(async () => {
+              const current = (await store.lookup(params.sessionId))!;
+              if (change === "authority") {
+                active = false;
+              } else {
+                expected =
+                  change === "lease"
+                    ? { ...legacy, lease: { token: "successor", expiresAt: Date.now() + 65_000 } }
+                    : { ...legacy, authFingerprint: "a".repeat(64) };
+                await store.register(params.sessionId, {
+                  ...expected,
+                  lease: expected.lease ?? current.lease,
+                });
+              }
+              return { ...createHostedSession(), id: legacy.sessionId };
+            });
+            await expect(harness.runAttempt(params)).rejects.toThrow(
+              change === "authority"
+                ? "fixture authority revoked"
+                : change === "lease"
+                  ? "lease lost"
+                  : "changed during migration",
+            );
+            expect(await store.lookup(params.sessionId)).toEqual(expected);
+          }
+          expectNoCalls(client.create, client.update, client.message);
+        } finally {
           active = true;
-          await store.register(params.sessionId, legacy);
-          let expected: StoredBinding = legacy;
-          client.session.mockImplementationOnce(async () => {
-            const current = (await store.lookup(params.sessionId))!;
-            if (change === "authority") {
-              active = false;
-            } else {
-              expected =
-                change === "lease"
-                  ? { ...legacy, lease: { token: "successor", expiresAt: Date.now() + 65_000 } }
-                  : { ...legacy, authFingerprint: "a".repeat(64) };
-              await store.register(params.sessionId, {
-                ...expected,
-                lease: expected.lease ?? current.lease,
-              });
-            }
-            return { ...createHostedSession(), id: legacy.sessionId };
-          });
-          await expect(harness.runAttempt(params)).rejects.toThrow(
-            change === "authority"
-              ? "fixture authority revoked"
-              : change === "lease"
-                ? "lease lost"
-                : "changed during migration",
-          );
-          expect(await store.lookup(params.sessionId)).toEqual(expected);
         }
-        expect(client.create).not.toHaveBeenCalled();
-        expect(client.update).not.toHaveBeenCalled();
-        expect(client.message).not.toHaveBeenCalled();
-      } finally {
-        active = true;
-        await harness.dispose();
-      }
-    });
+      },
+    );
   });
 
   it("resumes a shipped self-hosted binding with an expired lease without adopting an executor owner", async () => {
-    await withOpenClawTestState({ label: "agentsapi-upgrade-self-hosted" }, async (state) => {
-      const params = await createAttempt(state.stateDir);
-      // Exact v2026.9.9 producer identity, with its workspace-dependent environment.
-      const row = {
-        sessionId: legacy.sessionId,
-        authFingerprint: createHash("sha256")
-          .update(
-            JSON.stringify([
-              params.model.id,
-              params.resolvedApiKey,
-              { type: "self_hosted", workspace_directory: params.workspaceDir },
-            ]),
-          )
-          .digest("hex"),
-      };
-      const store = migrationStore(state.env);
-      await store.register(params.sessionId, {
-        ...row,
-        lease: { token: "expired-owner", expiresAt: Date.now() - 1 },
-      });
-      const client = mockClient("must-not-create");
-      client.session.mockResolvedValue({ ...createHostedSession(), id: row.sessionId });
-      const harness = registerHarness(state.env, () =>
-        pluginConfig({ environment: "self_hosted" }),
-      );
-      try {
+    await withMigration(
+      "agentsapi-upgrade-self-hosted",
+      async ({ params, store, client, harness }) => {
+        // Exact v2026.9.9 producer identity, with its workspace-dependent environment.
+        const environment = { type: "self_hosted", workspace_directory: params.workspaceDir };
+        const row = {
+          sessionId: legacy.sessionId,
+          authFingerprint: createHash("sha256")
+            .update(JSON.stringify([params.model.id, params.resolvedApiKey, environment]))
+            .digest("hex"),
+        };
+        await store.register(params.sessionId, {
+          ...row,
+          lease: { token: "expired-owner", expiresAt: Date.now() - 1 },
+        });
+        client.session.mockResolvedValue({ ...createHostedSession(), id: row.sessionId });
         expect(await harness.runAttempt(params)).toMatchObject({ terminal: { kind: "ok" } });
         const saved = await store.lookup(params.sessionId);
         expect(saved).toEqual({ sessionId: row.sessionId, configFingerprint: expect.any(String) });
         expect(saved?.configFingerprint).not.toBe(row.authFingerprint);
         expect(client.create).not.toHaveBeenCalled();
-      } finally {
-        await harness.dispose();
-      }
-    });
+      },
+      () => pluginConfig({ environment: "self_hosted" }),
+    );
   });
 
   it.each(["reset", "delete", "context rollback"] as const)(
@@ -322,34 +292,25 @@ export function registerMigrationTests(
           status: "in_progress",
         });
         const harness = fixture.createHarness();
+        const target = { ...fixture.params.sessionTarget, assertCurrent: () => {} };
+        const successor = {
+          sessionId: "successor-local-session",
+          previousSessionId: fixture.params.sessionId,
+        };
         if (operation === "context rollback") {
           await patchSessionEntry({
             ...fixture.params.sessionTarget,
-            update: () => ({
-              sessionId: "successor-local-session",
-              previousSessionId: fixture.params.sessionId,
-            }),
+            update: () => successor,
           });
         }
         const cleanup = () =>
           operation === "reset"
-            ? harness.reset({ ...fixture.params.sessionTarget, reason: "reset" })
+            ? harness.reset({ ...target, reason: "reset" })
             : operation === "delete"
-              ? harness.withSessionDeletion(
-                  { ...fixture.params.sessionTarget, assertCurrent: () => {} },
-                  async (settle) => settle(),
-                )
-              : harness.withSessionContextReset(
-                  {
-                    ...fixture.params.sessionTarget,
-                    sessionId: "successor-local-session",
-                    previousSessionId: fixture.params.sessionId,
-                    assertCurrent: () => {},
-                  },
-                  async (settle) => {
-                    await settle("rollback");
-                  },
-                );
+              ? harness.withSessionDeletion(target, async (settle) => settle())
+              : harness.withSessionContextReset({ ...target, ...successor }, async (settle) => {
+                  await settle("rollback");
+                });
         try {
           fixture.cancel.mockRejectedValueOnce(new Error("fixture settlement unavailable"));
           await expect(cleanup()).rejects.toThrow("fixture settlement unavailable");
