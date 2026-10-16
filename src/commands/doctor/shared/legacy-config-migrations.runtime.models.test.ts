@@ -16,29 +16,32 @@ function migration(id: string) {
   );
 }
 
-function expectUnchanged(migrate: ReturnType<typeof migration>, raw: Record<string, unknown>) {
-  const original = structuredClone(raw);
+function apply(migrate: ReturnType<typeof migration>, raw: Record<string, unknown>) {
   const changes: string[] = [];
   migrate.apply(raw, changes);
+  return changes;
+}
+
+function expectUnchanged(migrate: ReturnType<typeof migration>, raw: Record<string, unknown>) {
+  const original = structuredClone(raw);
+  expect(apply(migrate, raw)).toEqual([]);
   expect(raw).toEqual(original);
-  expect(changes).toEqual([]);
 }
 
 function providerConfig(providers: Record<string, unknown>) {
   return { models: { providers } };
 }
 
-it.each<[Record<string, unknown>, Record<string, unknown>, string[]]>([
-  [{ temperature: 0 }, { qwen_thinking_format: false }, ["models.providers.vllm.models"]],
-])("detects owned vLLM aliases: %j %j", (providerParams, modelParams, paths) => {
-  const raw = {
-    models: {
-      providers: {
-        vllm: { params: providerParams, models: [{ id: "local-model", params: modelParams }] },
-      },
+it("detects owned vLLM aliases", () => {
+  const raw = providerConfig({
+    vllm: {
+      params: { temperature: 0 },
+      models: [{ id: "local-model", params: { qwen_thinking_format: false } }],
     },
-  };
-  expect(findLegacyConfigIssues(raw).map((issue) => issue.path)).toEqual(paths);
+  });
+  expect(findLegacyConfigIssues(raw).map((issue) => issue.path)).toEqual([
+    "models.providers.vllm.models",
+  ]);
 });
 
 it("retires pricing while preserving the hosted catalog config", () => {
@@ -69,11 +72,7 @@ describe("model compat catalog ownership", () => {
         baseUrl: "https://api.anthropic.com/v1",
         models: [anthropic],
       },
-      openai: {
-        api: "openai-responses",
-        baseUrl: "https://api.openai.com/v1",
-        models: [openai],
-      },
+      openai: { api: "openai-responses", baseUrl: "https://api.openai.com/v1", models: [openai] },
     });
     const detect = () =>
       migrate.legacyRules?.map((rule) => rule.match?.(raw.models.providers, raw));
@@ -120,11 +119,9 @@ describe("explicit model allow policy migration", () => {
       },
     };
     const original = structuredClone(raw);
-    const changes: string[] = [];
-    migrate.apply(raw, changes);
+    expect(apply(migrate, raw)).toEqual([]);
     expect(validateConfigObjectRaw(raw).ok).toBe(true);
     expect(raw).toEqual(original);
-    expect(changes).toEqual([]);
     expect(migrate.legacyRules?.[1]?.match?.(raw.agents?.defaults?.models, raw)).toBe(true);
     for (const agentId of ["first", "second"]) {
       const policy = createModelVisibilityPolicy({
@@ -148,20 +145,16 @@ describe("explicit model allow policy migration", () => {
         },
       },
     };
-    const changes: string[] = [];
     expect(migrate.legacyRules?.[0]?.match?.(raw.agents.defaults.models, raw)).toBe(true);
-    migrate.apply(raw, changes);
+    expect(apply(migrate, raw)).toHaveLength(1);
     expect(raw).toMatchObject({
       agents: { defaults: { modelPolicy: { allow: ["openai/*", "anthropic/claude-sonnet-4-6"] } } },
       meta: { migrations: { modelPolicyAllowlist: true } },
     });
-    expect(changes).toHaveLength(1);
     expect(migrate.legacyRules?.[0]?.match?.(raw.agents.defaults.models, raw)).toBe(false);
     Object.assign(raw.agents.defaults, { modelPolicy: { allow: ["google/*"] } });
-    const secondChanges: string[] = [];
-    migrate.apply(raw, secondChanges);
+    expect(apply(migrate, raw)).toEqual([]);
     expect(raw).toHaveProperty("agents.defaults.modelPolicy.allow", ["google/*"]);
-    expect(secondChanges).toEqual([]);
   });
 
   it("leaves an explicit allowlist untouched", () => {
@@ -175,25 +168,16 @@ describe("explicit model allow policy migration", () => {
 
   it("marks a blank-only map migrated without stamping an allowlist", () => {
     const raw = { agents: { defaults: { models: { " ": {} } } } };
-    const changes: string[] = [];
-    migrate.apply(raw, changes);
+    expect(apply(migrate, raw)).toHaveLength(1);
     expect(raw.agents.defaults).not.toHaveProperty("modelPolicy");
     expect(raw).toHaveProperty("meta.migrations.modelPolicyAllowlist", true);
-    expect(changes).toHaveLength(1);
-    const secondChanges: string[] = [];
-    migrate.apply(raw, secondChanges);
-    expect(secondChanges).toEqual([]);
+    expect(apply(migrate, raw)).toEqual([]);
   });
 });
 
-it.each([
-  {
-    agents: { defaults: {}, list: [{ id: "worker", modelPolicy: { allow: ["codex/*"] } }] },
-    path: "agents.list[0].modelPolicy.allow.0",
-  },
-])("retains the legacy provider for a scoped wildcard: $path", ({ agents, path }) => {
+it("retains the legacy provider for a scoped wildcard", () => {
   const raw = {
-    agents,
+    agents: { defaults: {}, list: [{ id: "worker", modelPolicy: { allow: ["codex/*"] } }] },
     models: {
       providers: {
         codex: {
@@ -203,13 +187,13 @@ it.each([
       },
     },
   };
-  const changes: string[] = [];
-  migration("models.providers.codex-routes->models.providers.openai").apply(raw, changes);
+  expect(apply(migration("models.providers.codex-routes->models.providers.openai"), raw)).toEqual(
+    [],
+  );
   expect(raw.models.providers).toHaveProperty("codex");
   expect(raw.models.providers).not.toHaveProperty("openai");
-  expect(changes).toEqual([]);
   const blocked = collectBlockedLegacyOpenAICodexProviderPlan(raw);
-  expect(blocked.warning).toContain(path);
+  expect(blocked.warning).toContain("agents.list[0].modelPolicy.allow.0");
   expect(blocked.warning).toContain("authorize unrelated OpenAI models");
 });
 
@@ -222,22 +206,18 @@ describe("stale contextWindow migration", () => {
     "repairs only stale native-provider windows: $provider/$id ($before)",
     ({ provider, id, before, after }) => {
       const model = { id, contextWindow: before, maxTokens: 61_440 };
-      const raw = { models: { providers: { [provider]: { models: [model] } } } };
-      const changes: string[] = [];
+      const raw = providerConfig({ [provider]: { models: [model] } });
       expect(migrate.legacyRules?.[0]?.match?.(raw.models.providers, raw)).toBe(before !== after);
-      migrate.apply(raw, changes);
+      expect(apply(migrate, raw)).toHaveLength(before !== after ? 1 : 0);
       expect(model).toEqual({ id, contextWindow: after, maxTokens: 61_440 });
-      expect(changes).toHaveLength(before !== after ? 1 : 0);
       expect(migrate.legacyRules?.[0]?.match?.(raw.models.providers, raw)).toBe(false);
-      const secondChanges: string[] = [];
-      migrate.apply(raw, secondChanges);
-      expect(secondChanges).toEqual([]);
+      expect(apply(migrate, raw)).toEqual([]);
     },
   );
   it.each([{ models: "not-an-array" }, { models: [{ contextWindow: 200_000 }] }])(
     "leaves malformed provider rows unchanged: %j",
     (provider) => {
-      const raw = { models: { providers: { deepseek: provider } } };
+      const raw = providerConfig({ deepseek: provider });
       expectUnchanged(migrate, raw);
     },
   );

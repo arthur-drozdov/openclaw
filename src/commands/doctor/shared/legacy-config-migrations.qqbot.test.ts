@@ -48,6 +48,12 @@ describe("Tencent QQBot 2.0 config migrations", () => {
   });
 
   it("allocates distinct file SecretRefs for root and colliding account aliases", () => {
+    const ref = (provider: string) => ({ source: "file", provider, id: "value" });
+    const provider = (name: string) => ({
+      source: "file",
+      path: `/run/secrets/${name}`,
+      mode: "singleValue",
+    });
     const { config, qqbot } = migrateChannel({
       clientSecretFile: "/run/secrets/root",
       accounts: {
@@ -56,22 +62,16 @@ describe("Tencent QQBot 2.0 config migrations", () => {
       },
     });
     expect(qqbot).toMatchObject({
-      clientSecret: { source: "file", provider: "qqbot-client-secret", id: "value" },
+      clientSecret: ref("qqbot-client-secret"),
       accounts: {
-        ops: { clientSecret: { source: "file", provider: "qqbot-ops-client-secret", id: "value" } },
-        Ops: {
-          clientSecret: { source: "file", provider: "qqbot-ops-client-secret-2", id: "value" },
-        },
+        ops: { clientSecret: ref("qqbot-ops-client-secret") },
+        Ops: { clientSecret: ref("qqbot-ops-client-secret-2") },
       },
     });
     expect(config).toHaveProperty("secrets.providers", {
-      "qqbot-client-secret": { source: "file", path: "/run/secrets/root", mode: "singleValue" },
-      "qqbot-ops-client-secret": { source: "file", path: "/run/secrets/ops", mode: "singleValue" },
-      "qqbot-ops-client-secret-2": {
-        source: "file",
-        path: "/run/secrets/other",
-        mode: "singleValue",
-      },
+      "qqbot-client-secret": provider("root"),
+      "qqbot-ops-client-secret": provider("ops"),
+      "qqbot-ops-client-secret-2": provider("other"),
     });
     expect(JSON.stringify(config)).not.toContain("clientSecretFile");
   });
@@ -185,30 +185,23 @@ describe("Tencent QQBot 2.0 config migrations", () => {
   });
 
   it("maps group tool policies without broadening existing restrictions", () => {
+    const groups = [
+      ["full", { tools: { allow: [] } }, "full"],
+      ["wildcard", { tools: { allow: ["*"] } }, "full"],
+      ["empty", { tools: {} }, "full"],
+      ["emptyDeny", { tools: { deny: [] } }, "full"],
+      ["restricted", { tools: { deny: ["write", "exec", "read"] } }, "restricted"],
+      ["none", { tools: { deny: ["*"] } }, "none"],
+      ["custom", { tools: { allow: ["read"] } }, "none"],
+      ["senderSpecific", { toolsBySender: { admin: { allow: [] } } }, "none"],
+      ["coexist", { toolPolicy: "full", tools: { deny: ["*"] } }, "none"],
+    ] as const;
     const { qqbot } = migrateChannel({
-      groups: {
-        full: { tools: { allow: [] } },
-        wildcard: { tools: { allow: ["*"] } },
-        empty: { tools: {} },
-        emptyDeny: { tools: { deny: [] } },
-        restricted: { tools: { deny: ["write", "exec", "read"] } },
-        none: { tools: { deny: ["*"] } },
-        custom: { tools: { allow: ["read"] } },
-        senderSpecific: { toolsBySender: { admin: { allow: [] } } },
-        coexist: { toolPolicy: "full", tools: { deny: ["*"] } },
-      },
+      groups: Object.fromEntries(groups.map(([id, input]) => [id, input])),
     });
-    expect(qqbot?.groups).toEqual({
-      full: { toolPolicy: "full" },
-      wildcard: { toolPolicy: "full" },
-      empty: { toolPolicy: "full" },
-      emptyDeny: { toolPolicy: "full" },
-      restricted: { toolPolicy: "restricted" },
-      none: { toolPolicy: "none" },
-      custom: { toolPolicy: "none" },
-      senderSpecific: { toolPolicy: "none" },
-      coexist: { toolPolicy: "none" },
-    });
+    expect(qqbot?.groups).toEqual(
+      Object.fromEntries(groups.map(([id, , toolPolicy]) => [id, { toolPolicy }])),
+    );
   });
 
   it("removes command levels and locks only accounts with restrictive group commands", () => {

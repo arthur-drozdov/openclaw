@@ -100,12 +100,7 @@ describe("retired runtime config migrations", () => {
   it("removes legacy-only enablement without enabling broad hook discovery", () => {
     const raw = {
       hooks: {
-        internal: {
-          enabled: true,
-          handlers: [],
-          entries: {},
-          load: { extraDirs: ["  "] },
-        },
+        internal: { enabled: true, handlers: [], entries: {}, load: { extraDirs: ["  "] } },
       },
     };
     applyAll(raw);
@@ -125,9 +120,7 @@ describe("retired runtime config migrations", () => {
   it("removes even an explicitly disabled retired device-auth bypass", () => {
     const raw = { gateway: { controlUi: { dangerouslyDisableDeviceAuth: false } } };
     expect(findLegacyConfigIssues(raw)).toContainEqual(
-      expect.objectContaining({
-        path: "gateway.controlUi.dangerouslyDisableDeviceAuth",
-      }),
+      expect.objectContaining({ path: "gateway.controlUi.dangerouslyDisableDeviceAuth" }),
     );
     applyAll(raw);
     expect(raw).toEqual({ gateway: { controlUi: {} } });
@@ -260,10 +253,7 @@ describe("retired runtime config migrations", () => {
         whatsapp: {
           defaultAccount: "Work",
           debounceMs: 2_000,
-          accounts: {
-            default: { debounceMs: 3_000 },
-            work: { debounceMs: 4_000 },
-          },
+          accounts: { default: { debounceMs: 3_000 }, work: { debounceMs: 4_000 } },
         },
       },
     });
