@@ -2,6 +2,7 @@ import { getObserver } from "@solidjs/signals";
 import { insert, type JSX } from "@solidjs/web";
 import {
   createEffect,
+  createMemo,
   createRoot,
   getOwner,
   onCleanup,
@@ -17,6 +18,7 @@ import { defineSolidBridge, type SolidBridgeElement } from "../lit/solid-bridge.
 import { PluginView } from "../plugins/control-ui-view.solid.tsx";
 import { appSidebarProperties, type AppSidebarProps } from "./app-sidebar-base.ts";
 import { AppSidebarOwner } from "./app-sidebar-owner.tsx";
+import { createSessionOwnerFilterQuery } from "./session-owner-filter.ts";
 import { createSidebarScroll } from "./sidebar-context-controller.ts";
 
 export { AppSidebarOwner } from "./app-sidebar-owner.tsx";
@@ -57,6 +59,19 @@ function AppSidebarContent(props: AppSidebarProps, host: HTMLElement): JSX.Eleme
     subscribe: (current, notify) => current.subscribe(notify),
     equality: "revision",
   });
+  const prepared = createMemo(
+    () => {
+      projection.revision();
+      Object.values(props);
+      // Restore query state and release boot snapshots before their consumers read.
+      owner.prepareRender();
+      return owner;
+    },
+    { equals: false },
+  );
+  createSessionOwnerFilterQuery(owner.sessionOwnerFilter, prepared, () =>
+    context.sessions.listSnapshot(owner.sessionData.sessionListQuery(owner.expandedAgentId())),
+  );
   const presentationRevision = createParkedProjection(
     () => {
       Object.values(props);
@@ -119,10 +134,7 @@ function AppSidebarContent(props: AppSidebarProps, host: HTMLElement): JSX.Eleme
   const content = hostView.renderSidebar(Sessions, scroll);
   createEffect(
     () => {
-      projection.revision();
-      // Props remain on the bridge's live object; source changes refresh its subscriptions.
-      Object.values(props);
-      owner.prepareRender();
+      prepared();
       scroll.capture();
     },
     () =>
