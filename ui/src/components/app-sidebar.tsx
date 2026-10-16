@@ -20,6 +20,7 @@ import { appSidebarProperties, type AppSidebarProps } from "./app-sidebar-base.t
 import { AppSidebarOwner } from "./app-sidebar-owner.tsx";
 import { createSessionOwnerFilterQuery } from "./session-owner-filter.ts";
 import { createSidebarScroll } from "./sidebar-context-controller.ts";
+import { createSidebarNavigationCatalog } from "./sidebar-navigation-catalog.ts";
 
 export { AppSidebarOwner } from "./app-sidebar-owner.tsx";
 
@@ -51,7 +52,9 @@ function disconnectSidebarOwner(host: HTMLElement): void {
 function AppSidebarContent(props: AppSidebarProps, host: HTMLElement): JSX.Element {
   host.style.display = "contents";
   const context = useApplication();
-  const owner = sidebarOwners.get(host) ?? new AppSidebarOwner(props, context, host);
+  const catalog = createSidebarNavigationCatalog(context, () => props.navigationView, host);
+  const owner = sidebarOwners.get(host) ?? new AppSidebarOwner(catalog, props, context, host);
+  owner.navigationCatalog = catalog;
   owner.bindInputs(props, context);
   const scroll = createSidebarScroll(owner);
   const projection = projectSource(owner, {
@@ -63,6 +66,8 @@ function AppSidebarContent(props: AppSidebarProps, host: HTMLElement): JSX.Eleme
     () => {
       projection.revision();
       Object.values(props);
+      // Snapshot capture keeps observing Pages after its navigation view closes.
+      void catalog.dashboards;
       // Restore query state and release boot snapshots before their consumers read.
       owner.prepareRender();
       return owner;
@@ -100,7 +105,6 @@ function AppSidebarContent(props: AppSidebarProps, host: HTMLElement): JSX.Eleme
     owner.sessionData,
     owner.sessionOrganizer,
     owner.people,
-    owner.navigationCatalog,
   ].forEach(observe);
   const solidOwner = getOwner();
   const mountDefaultView = (target: HTMLElement) =>
