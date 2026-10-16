@@ -124,7 +124,7 @@ export async function quarantineAgentDeletionJournal(params: {
               inspection = await reader.inspect(input, undefined, snapshot.location);
             } finally {
               if (!(await snapshot.cleanupAsync())) {
-                throw new Error("Could not remove the deletion-history inspection snapshot.");
+                inspection = null;
               }
             }
           }
