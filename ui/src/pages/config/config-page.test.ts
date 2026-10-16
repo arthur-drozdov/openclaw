@@ -37,15 +37,34 @@ import {
 const switchActiveRealtimeTalkCameras =
   vi.fn<typeof realtimeTalk.switchActiveRealtimeTalkCameras>();
 
-let localStorageMock: Storage;
+function profileContext(
+  gatewayUrl: string,
+  profileId: string | null,
+  config: object | null,
+  scopes = ["operator.write"],
+) {
+  return {
+    gateway: {
+      connection: { gatewayUrl },
+      snapshot: {
+        selfUser: profileId ? { id: profileId } : null,
+        hello: { auth: { role: "operator", scopes } },
+      },
+    },
+    runtimeConfig: {
+      state: { connected: config !== null, configSnapshot: config === null ? null : { config } },
+      canPatch: false,
+    },
+    theme: { refresh: vi.fn() },
+  } as unknown as ApplicationContext;
+}
 
 beforeEach(() => {
   window.history.replaceState({}, "", "/");
   vi.spyOn(realtimeTalk, "switchActiveRealtimeTalkCameras").mockImplementation(
     switchActiveRealtimeTalkCameras,
   );
-  localStorageMock = createStorageMock();
-  vi.stubGlobal("localStorage", localStorageMock);
+  vi.stubGlobal("localStorage", createStorageMock());
   resetServerUiPrefsSync();
   switchActiveRealtimeTalkCameras.mockReset();
   switchActiveRealtimeTalkCameras.mockResolvedValue(undefined);
@@ -109,18 +128,14 @@ describe("ConfigPage synced preference provenance", () => {
       runtimeConfig: { state: { connected: true }, canPatch },
     } as unknown as ApplicationContext;
 
-    expect(canSyncAppearancePreference(context, "theme")).toBe(appearanceCanSync);
-    expect(canSyncAppearancePreference(context, "themeMode")).toBe(appearanceCanSync);
-    expect(canSyncAppearancePreference(context, "accent")).toBe(appearanceCanSync);
-    expect(canSyncAppearancePreference(context, "fontUi")).toBe(
-      Boolean(selfUser) && appearanceCanSync,
-    );
-    expect(canSyncAppearancePreference(context, "fontChat")).toBe(
-      Boolean(selfUser) && appearanceCanSync,
-    );
-    expect(canSyncAppearancePreference(context, "tabIcon")).toBe(
-      Boolean(selfUser) && appearanceCanSync,
-    );
+    for (const key of ["theme", "themeMode", "accent"] as const) {
+      expect(canSyncAppearancePreference(context, key)).toBe(appearanceCanSync);
+    }
+    for (const key of ["fontUi", "fontChat", "tabIcon"] as const) {
+      expect(canSyncAppearancePreference(context, key)).toBe(
+        Boolean(selfUser) && appearanceCanSync,
+      );
+    }
     expect(canSyncAppearancePreference(context)).toBe(localeCanSync);
   });
 
@@ -136,20 +151,7 @@ describe("ConfigPage synced preference provenance", () => {
       scope: "ws://profile.test",
       onApplied: vi.fn(),
     });
-    const context = {
-      gateway: {
-        connection: { gatewayUrl: "ws://profile.test" },
-        snapshot: {
-          selfUser: { id: "profile-owner" },
-          hello: { auth: { role: "operator", scopes: ["operator.write"] } },
-        },
-      },
-      runtimeConfig: {
-        state: { connected: true, configSnapshot: { config: configObject } },
-        canPatch: false,
-      },
-      theme: { refresh: vi.fn() },
-    } as unknown as ApplicationContext;
+    const context = profileContext("ws://profile.test", "profile-owner", configObject);
     const beforeReset = loadSettings();
     const { state } = mountConfigPageState(context);
 
@@ -165,12 +167,12 @@ describe("ConfigPage synced preference provenance", () => {
   });
 
   it.each([
-    ["loading", undefined, true],
-    ["disconnected", undefined, true],
-    ["before-load-disconnect", "#55bb77", true],
+    ["loading", undefined],
+    ["disconnected", undefined],
+    ["before-load-disconnect", "#55bb77"],
   ] as const)(
-    "reconciles the returned accent after a %s reset with server value %s (edited: %s)",
-    async (connection, returnedAccent, edited) => {
+    "reconciles the returned accent after a %s reset with server value %s",
+    async (connection, returnedAccent) => {
       const profileId = "profile-viewer";
       const scope = "ws://profile.test";
       const configObject = { ui: { prefs: { accent: "#abcdef" } } };
@@ -184,10 +186,8 @@ describe("ConfigPage synced preference provenance", () => {
       await refreshProfileAppearancePrefs({ ...options, client: initial.state.client! });
       resetServerUiPrefsSync();
       flushServerUiPrefs(initial, { profileId, canWrite: false });
-      if (edited) {
-        patchSettings({ accent: "#654321" });
-        pushServerUiPrefs(initial, { accent: "#654321" }, { profileId, canWrite: false });
-      }
+      patchSettings({ accent: "#654321" });
+      pushServerUiPrefs(initial, { accent: "#654321" }, { profileId, canWrite: false });
 
       const delayed = deferred<unknown>();
       const request = vi.fn((_method: string) => delayed.promise);
@@ -199,20 +199,12 @@ describe("ConfigPage synced preference provenance", () => {
         pending = refreshProfileAppearancePrefs({ ...options, client: writer.state.client! });
         await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
       }
-      const context = {
-        gateway: {
-          connection: { gatewayUrl: scope },
-          snapshot: {
-            selfUser: connected ? { id: profileId } : null,
-            hello: { auth: { role: "operator", scopes: ["operator.read"] } },
-          },
-        },
-        runtimeConfig: {
-          state: { connected, configSnapshot: connected ? { config: configObject } : null },
-          canPatch: false,
-        },
-        theme: { refresh: vi.fn() },
-      } as unknown as ApplicationContext;
+      const context = profileContext(
+        scope,
+        connected ? profileId : null,
+        connected ? configObject : null,
+        ["operator.read"],
+      );
       const previous = loadSettings();
       const { state } = mountConfigPageState(context);
       state.configProps().setAccent(undefined);
@@ -250,20 +242,7 @@ describe("ConfigPage synced preference provenance", () => {
         scope: gatewayUrl,
         onApplied: vi.fn(),
       });
-      const context = {
-        gateway: {
-          connection: { gatewayUrl },
-          snapshot: {
-            selfUser: { id: "font-owner" },
-            hello: { auth: { role: "operator", scopes: ["operator.write"] } },
-          },
-        },
-        runtimeConfig: {
-          state: { connected: true, configSnapshot: { config: configObject } },
-          canPatch: false,
-        },
-        theme: { refresh: vi.fn() },
-      } as unknown as ApplicationContext;
+      const context = profileContext(gatewayUrl, "font-owner", configObject);
       const previous = loadSettings();
       const { state } = mountConfigPageState(context);
       state.configProps().setFontUi(undefined);
@@ -280,13 +259,8 @@ describe("ConfigPage synced preference provenance", () => {
       state: {
         client: null,
         connected: true,
-        configLoading: false,
         configRaw: JSON.stringify(draftConfig),
         configRawOriginal: JSON.stringify(committedConfig),
-        configValid: true,
-        configIssues: [],
-        configSaving: false,
-        configApplying: false,
         configNeedsApply: false,
         configSnapshot: {
           config: committedConfig,
@@ -297,22 +271,13 @@ describe("ConfigPage synced preference provenance", () => {
           valid: true,
         },
         configSchema: { type: "object", properties: {} },
-        configSchemaLoading: false,
-        configUiHints: {},
         configForm: draftConfig,
         configFormOriginal: committedConfig,
         configFormDirty: true,
-        configFormMode: "form",
       },
       patchForm: vi.fn(),
-      removeFormValue: vi.fn(),
-      setRaw: vi.fn(),
-      save: vi.fn(),
-      discardDraft: vi.fn(),
-      openFile: vi.fn(),
     } as unknown as ApplicationContext["runtimeConfig"];
     const context = {
-      basePath: "",
       config: {
         current: {
           assistantIdentity: { name: "OpenClaw" },
@@ -326,18 +291,9 @@ describe("ConfigPage synced preference provenance", () => {
           phase: "connected",
         },
       },
-      navigate: vi.fn(),
-      overlays: {
-        snapshot: {
-          updateReconciliationPending: false,
-          updateRunning: false,
-        },
-      },
       runtimeConfig,
       agentSelection: { state: { selectedId: null } },
-      agents: { state: { agentsList: null } },
       theme: { branding: resolveThemeBranding(undefined), refresh: vi.fn() },
-      webPush: { snapshot: {} },
     } as unknown as ApplicationContext;
     const beforeReset = loadSettings();
     const { container } = mountConfigPage(context, { pageId: "appearance" });
@@ -707,30 +663,23 @@ describe("ConfigPage Updates integration", () => {
     const policySwitches = [
       ...container.querySelectorAll<HTMLInputElement>(".settings-toggle__input"),
     ];
-    const checks = policySwitches.find(
-      (control) =>
-        control
-          .closest(".settings-row")
-          ?.querySelector(".settings-row__title")
-          ?.textContent?.trim() === "Check for updates",
-    );
-    if (!checks) {
-      throw new Error("Missing update checks control");
+    for (const [title, checked] of [
+      ["Check for updates", false],
+      ["Automatic updates", true],
+    ] as const) {
+      const control = policySwitches.find(
+        (input) =>
+          input
+            .closest(".settings-row")
+            ?.querySelector(".settings-row__title")
+            ?.textContent?.trim() === title,
+      );
+      if (!control) {
+        throw new Error(`Missing ${title} control`);
+      }
+      control.checked = checked;
+      control.dispatchEvent(new Event("change"));
     }
-    checks.checked = false;
-    checks.dispatchEvent(new Event("change"));
-    const automatic = policySwitches.find(
-      (control) =>
-        control
-          .closest(".settings-row")
-          ?.querySelector(".settings-row__title")
-          ?.textContent?.trim() === "Automatic updates",
-    );
-    if (!automatic) {
-      throw new Error("Missing automatic update control");
-    }
-    automatic.checked = true;
-    automatic.dispatchEvent(new Event("change"));
     [...container.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent?.includes("Update now"))
       ?.click();

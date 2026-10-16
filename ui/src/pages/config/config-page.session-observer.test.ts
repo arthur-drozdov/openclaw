@@ -4,7 +4,6 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { createRouter } from "@openclaw/uirouter";
 import { createComponent } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveThemeBranding } from "../../../../packages/gateway-protocol/src/theme.ts";
 import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { ModelCatalogEntry, ModelCatalogResult } from "../../api/types.ts";
@@ -49,30 +48,19 @@ describe("ConfigPage navigation", () => {
 
   describe("ConfigPage advanced selection guard", () => {
     it("keeps curated sections off the Advanced page", () => {
-      expect(configSelectionFromSearch("advanced", "?section=messages")).toEqual({
-        activeSection: null,
-        activeSubsection: null,
-      });
-      expect(configSelectionFromSearch("advanced", "?section=env")).toEqual({
-        activeSection: "env",
-        activeSubsection: null,
-      });
-      expect(configSelectionFromSearch("advanced", "?section=mcp")).toEqual({
-        activeSection: null,
-        activeSubsection: null,
-      });
-      expect(configSelectionFromSearch("advanced", "?section=tts")).toEqual({
-        activeSection: null,
-        activeSubsection: null,
-      });
-      expect(configSelectionFromSearch("advanced", "?section=broadcast")).toEqual({
-        activeSection: "broadcast",
-        activeSubsection: null,
-      });
-      expect(configSelectionFromSearch("advanced", "?section=models")).toEqual({
-        activeSection: "models",
-        activeSubsection: null,
-      });
+      for (const [section, activeSection] of [
+        ["messages", null],
+        ["env", "env"],
+        ["mcp", null],
+        ["tts", null],
+        ["broadcast", "broadcast"],
+        ["models", "models"],
+      ]) {
+        expect(configSelectionFromSearch("advanced", `?section=${section}`)).toEqual({
+          activeSection,
+          activeSubsection: null,
+        });
+      }
     });
   });
 
@@ -86,7 +74,6 @@ describe("ConfigPage navigation", () => {
 
   function routeContext(): ApplicationContext {
     const config = { messages: { ackReaction: "!" }, tts: { provider: "synthetic" } };
-    const subscribe = () => () => undefined;
     const { gateway } = createApplicationGateway({
       client: null,
       phase: "offline",
@@ -98,21 +85,14 @@ describe("ConfigPage navigation", () => {
       lastError: null,
       lastErrorCode: null,
     });
-    return {
-      basePath: "",
+    return completeConfigContext({
       gateway,
-      settingsAgentSelection: { state: { selectedId: "main" }, subscribe },
-      agentSelection: { state: { selectedId: "main" }, subscribe },
-      agents: { state: { agentsList: null }, subscribe },
       config: {
         current: { assistantIdentity: { name: "OpenClaw" }, serverVersion: "test" },
-        subscribe,
       },
       runtimeConfig: {
         state: {
           connected: false,
-          configLoading: false,
-          configSchemaLoading: false,
           configSnapshot: { config, runtimeConfig: config, hash: "settings-defaults" },
           configSchema: {
             type: "object",
@@ -121,22 +101,13 @@ describe("ConfigPage navigation", () => {
               tts: { type: "object", properties: { provider: { type: "string" } } },
             },
           },
-          configUiHints: {},
           configForm: config,
           configFormOriginal: config,
           configRaw: JSON.stringify(config),
           configRawOriginal: JSON.stringify(config),
-          configValid: true,
-          configIssues: [],
         },
-        ensureLoaded: async () => undefined,
-        ensureSchemaLoaded: async () => undefined,
-        subscribe,
       },
-      theme: { branding: resolveThemeBranding(undefined), serverSelection: null, subscribe },
-      overlays: { snapshot: {}, subscribe },
-      webPush: { snapshot: undefined, subscribe },
-    } as unknown as ApplicationContext;
+    } as unknown as ApplicationContext);
   }
 
   describe("ConfigPage route selections", () => {
@@ -164,15 +135,11 @@ describe("ConfigPage navigation", () => {
             },
           },
         };
-        const routeData = {
+        const routeData = configRouteData({
           pathname: `/settings/${pageId}`,
           search: `?section=${section}`,
           hash: "",
-          section,
-          advanced: false,
-          tab: null,
-          targetBlockId: null,
-        };
+        });
         const view = mountConfigPage(context, { pageId, routeData });
         const editor = view.container.querySelector(`#config-section-${section}`)!;
         const disclosure = editor.closest("details")!;
@@ -482,18 +449,9 @@ describe("ConfigPage model catalog lifecycle", () => {
       phase: "connected",
       hello: gatewayHelloForMethods(["system.info"], scopes),
     } as ApplicationGatewaySnapshot);
-    const subscribe = () => () => undefined;
     const context = {
       gateway: source.gateway,
-      settingsAgentSelection: { state: { selectedId: "main" }, subscribe },
-      agentSelection: { state: { selectedId: "main" }, subscribe },
-      agents: { state: { agentsList: null }, subscribe },
-      agentIdentity: { ensure: async () => undefined, subscribe },
-      runtimeConfig: { state: { configSnapshot: {}, configSchema: {} }, subscribe },
-      theme: { branding: resolveThemeBranding(undefined), serverSelection: null, subscribe },
-      overlays: { snapshot: {}, subscribe },
-      config: { current: { assistantIdentity: { name: "OpenClaw" } }, subscribe },
-      webPush: { subscribe },
+      runtimeConfig: { state: { configSnapshot: {}, configSchema: {} } },
     } as unknown as ApplicationContext;
     const view = mountConfigPage(context, { pageId: "appearance" });
     await waitForSolid(() =>
@@ -516,8 +474,19 @@ describe("ConfigPage model catalog lifecycle", () => {
     return picker.params.options.slice(2).map(({ value, label }) => ({ value, label }));
   }
 
-  function expectedModels(models: ModelCatalogEntry[]) {
-    return models.map((model) => ({ value: `${model.provider}/${model.id}`, label: model.name }));
+  function expectModels(
+    view: ReturnType<typeof mountConfigPage>,
+    models: ModelCatalogEntry[] = [],
+  ) {
+    const expected = models.map((model) => ({
+      value: `${model.provider}/${model.id}`,
+      label: model.name,
+    }));
+    return waitForSolid(() => expect(observerModels(view)).toEqual(expected));
+  }
+
+  function statusReads(request: { mock: { calls: Array<[string, ...unknown[]]> } }) {
+    return request.mock.calls.filter(([method]) => method === "system.info");
   }
 
   describe("ConfigPage session observer models", () => {
@@ -528,25 +497,21 @@ describe("ConfigPage model catalog lifecycle", () => {
       ]);
       await vi.advanceTimersByTimeAsync(30_000);
       expect(request).not.toHaveBeenCalled();
-      await waitForSolid(() => expect(observerModels(view)).toEqual([]));
+      await expectModels(view);
       source.publish({
         ...source.gateway.snapshot,
         hello: gatewayHelloForMethods(["system.info"]),
       });
       flush();
-      await waitForSolid(() =>
-        expect(request.mock.calls.filter(([method]) => method === "system.info")).toHaveLength(1),
-      );
+      await waitForSolid(() => expect(statusReads(request)).toHaveLength(1));
       source.publish({
         ...source.gateway.snapshot,
         hello: gatewayHelloForMethods(["system.info"], ["operator.sessions.read"]),
       });
       flush();
       await vi.advanceTimersByTimeAsync(30_000);
-      await waitForSolid(() =>
-        expect(request.mock.calls.filter(([method]) => method === "system.info")).toHaveLength(1),
-      );
-      await waitForSolid(() => expect(observerModels(view)).toEqual([]));
+      await waitForSolid(() => expect(statusReads(request)).toHaveLength(1));
+      await expectModels(view);
     });
 
     it("pauses hidden status reads and resumes one ten-second poll when visible", async () => {
@@ -556,29 +521,29 @@ describe("ConfigPage model catalog lifecycle", () => {
         Promise.resolve(method === "models.list" ? { models: [] } : {}),
       );
       const { view } = await mount({ request } as unknown as GatewayBrowserClient);
-      const statusReads = () => request.mock.calls.filter(([method]) => method === "system.info");
+      const reads = () => statusReads(request);
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(statusReads()).toHaveLength(0);
+      expect(reads()).toHaveLength(0);
 
       visibility = "visible";
       document.dispatchEvent(new Event("visibilitychange"));
       globalThis.dispatchEvent(new Event("focus"));
       flush();
-      expect(statusReads()).toHaveLength(1);
+      expect(reads()).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(9_999);
-      expect(statusReads()).toHaveLength(1);
+      expect(reads()).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(1);
-      expect(statusReads()).toHaveLength(2);
+      expect(reads()).toHaveLength(2);
 
       visibility = "hidden";
       document.dispatchEvent(new Event("visibilitychange"));
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(statusReads()).toHaveLength(2);
+      expect(reads()).toHaveLength(2);
       view.dispose();
       visibility = "visible";
       document.dispatchEvent(new Event("visibilitychange"));
       await vi.advanceTimersByTimeAsync(10_000);
-      expect(statusReads()).toHaveLength(2);
+      expect(reads()).toHaveLength(2);
     });
 
     it.each(["client", "source"] as const)(
@@ -608,16 +573,12 @@ describe("ConfigPage model catalog lifecycle", () => {
         const currentModels = [{ id: "small", name: "Small", provider: "openai" }];
         second.resolve({ models: currentModels });
         flush();
-        await waitForSolid(() =>
-          expect(observerModels(view)).toEqual(expectedModels(currentModels)),
-        );
+        await expectModels(view, currentModels);
 
         first.resolve({ models: [{ id: "stale", name: "Stale", provider: "old" }] });
         await first.promise;
         flush();
-        await waitForSolid(() =>
-          expect(observerModels(view)).toEqual(expectedModels(currentModels)),
-        );
+        await expectModels(view, currentModels);
         expect(modelCatalogStore.loadModelCatalog).toHaveBeenCalledTimes(2);
         expect(modelCatalogStore.loadModelCatalog).toHaveBeenNthCalledWith(1, firstClient, {
           agentId: "main",
@@ -658,23 +619,21 @@ describe("ConfigPage model catalog lifecycle", () => {
       const writerModels = [{ id: "writer-model", name: "Writer Model", provider: "openai" }];
       writer.resolve({ models: writerModels });
       flush();
-      await waitForSolid(() => expect(observerModels(view)).toEqual(expectedModels(writerModels)));
+      await expectModels(view, writerModels);
 
       selection.selectedId = "main";
       publishConfigSource(context.settingsAgentSelection);
       flush();
       const currentMainModels = [{ id: "current-main", name: "Current Main", provider: "openai" }];
       await waitForSolid(() => expect(mainRequests).toBe(2));
-      await waitForSolid(() => expect(observerModels(view)).toEqual([]));
+      await expectModels(view);
       firstMain.resolve({ models: [{ id: "stale-main", name: "Stale Main", provider: "openai" }] });
       flush();
       expect(mainRequests).toBe(2);
-      await waitForSolid(() => expect(observerModels(view)).toEqual([]));
+      await expectModels(view);
       secondMain.resolve({ models: currentMainModels });
       flush();
-      await waitForSolid(() =>
-        expect(observerModels(view)).toEqual(expectedModels(currentMainModels)),
-      );
+      await expectModels(view, currentMainModels);
       expect(request.mock.calls.filter(([method]) => method === "models.list")).toEqual(
         ["main", "writer", "main"].map((agentId) => [
           "models.list",
@@ -685,7 +644,7 @@ describe("ConfigPage model catalog lifecycle", () => {
       selection.selectedId = null;
       publishConfigSource(context.settingsAgentSelection);
       flush();
-      await waitForSolid(() => expect(observerModels(view)).toEqual([]));
+      await expectModels(view);
       await waitForSolid(() =>
         expect(view.page.textContent).toContain("Explicit model catalog unavailable"),
       );
@@ -715,19 +674,19 @@ describe("ConfigPage model catalog lifecycle", () => {
       // The application retires catalogs on publication; the next status poll reads that generation.
       invalidateChatMetadataStore(client);
       await vi.advanceTimersByTimeAsync(10_000);
-      await waitForSolid(() => expect(observerModels(view)).toEqual(expectedModels(original)));
+      await expectModels(view, original);
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(request.mock.calls.filter(([method]) => method === "system.info")).toHaveLength(6);
+      expect(statusReads(request)).toHaveLength(6);
       expect(catalogReads).toBe(2);
       view.dispose();
       flush();
 
       const remounted = mountConfigPage(context, { pageId: "appearance" });
       await waitForSolid(() => expect(catalogReads).toBe(3));
-      await waitForSolid(() => expect(observerModels(remounted)).toEqual(expectedModels(fresh)));
+      await expectModels(remounted, fresh);
       stale.resolve({ models: original });
       flush();
-      await waitForSolid(() => expect(observerModels(remounted)).toEqual(expectedModels(fresh)));
+      await expectModels(remounted, fresh);
       expect(catalogReads).toBe(3);
     });
 
@@ -736,21 +695,15 @@ describe("ConfigPage model catalog lifecycle", () => {
         Promise.resolve(method === "models.list" ? { models: [] } : {}),
       );
       const { view } = await mount({ request } as unknown as GatewayBrowserClient);
-      await waitForSolid(() =>
-        expect(request.mock.calls.filter(([method]) => method === "system.info")).toHaveLength(1),
-      );
+      await waitForSolid(() => expect(statusReads(request)).toHaveLength(1));
       view.update({ pageId: "advanced" });
       flush();
       await vi.advanceTimersByTimeAsync(20_000);
       expect(view.page.isConnected).toBe(true);
-      await waitForSolid(() =>
-        expect(request.mock.calls.filter(([method]) => method === "system.info")).toHaveLength(1),
-      );
+      await waitForSolid(() => expect(statusReads(request)).toHaveLength(1));
       view.update({ pageId: "appearance" });
       flush();
-      await waitForSolid(() =>
-        expect(request.mock.calls.filter(([method]) => method === "system.info")).toHaveLength(2),
-      );
+      await waitForSolid(() => expect(statusReads(request)).toHaveLength(2));
     });
   });
 });
@@ -796,16 +749,10 @@ describe("ConfigPage meeting capture", () => {
       await runtimeConfig.ensureLoaded();
       await runtimeConfig.ensureSchemaLoaded();
       const context = {
-        basePath: "",
         gateway: { ...gateway, connection: { gatewayUrl: "ws://transcripts.test" } },
         runtimeConfig,
-        agentSelection: { state: { selectedId: "main" } },
-        agents: { state: { agentsList: null } },
-        theme: { branding: resolveThemeBranding(undefined) },
         navigate: vi.fn(),
-        config: { current: { assistantIdentity: { name: "OpenClaw" } } },
         overlays: { snapshot: { updateRunning: false, updateReconciliationPending: false } },
-        webPush: { snapshot: {} },
       } as unknown as ApplicationContext;
       const view = mountConfigPage(context, { pageId: "communications" });
       const container = view.container;
@@ -839,15 +786,11 @@ describe("ConfigPage meeting capture", () => {
         advanced.addEventListener("toggle", () => resolve(), { once: true });
       });
       view.update({
-        routeData: {
+        routeData: configRouteData({
           pathname: "/settings/communications",
           search: "?section=transcripts&advanced=1",
           hash: "#config-section-transcripts",
-          section: "transcripts",
-          advanced: true,
-          tab: null,
-          targetBlockId: "config-section-transcripts",
-        },
+        }),
       });
       await waitForSolid(() => expect(advanced.open).toBe(true));
       expect(container.querySelector("openclaw-meeting-capture-settings")).toBe(capture);
