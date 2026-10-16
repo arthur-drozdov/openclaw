@@ -5,6 +5,7 @@ import { waitForSolid } from "../test-helpers/solid-settle.ts";
 import { renderHubTabs } from "./hub-tabs.ts";
 import { HubTabs } from "./solid/hub-tabs.tsx";
 import "../styles/base.css";
+import "../styles/agents.css";
 
 it.each(["primary", "sub"] as const)(
   "keeps %s hub tabs at their natural height above a flexing panel",
@@ -46,6 +47,47 @@ it.each(["primary", "sub"] as const)(
     ).toBeLessThanOrEqual(root.getBoundingClientRect().bottom);
   },
 );
+
+it("shrinks row-hosted tabs to keep the trailing Add File control inside the panel", async () => {
+  const root = document.createElement("div");
+  root.className = "agent-file-tabs";
+  root.style.width = "280px";
+  document.body.append(root);
+  onTestFinished(() => {
+    render(nothing, root);
+    root.remove();
+  });
+  render(
+    html`${renderHubTabs({
+        id: "agent-files",
+        active: "agents",
+        tabs: [
+          { value: "agents", label: "AGENTS" },
+          { value: "heartbeat", label: "HEARTBEAT", badge: "Missing" },
+          { value: "identity", label: "IDENTITY", badge: "Missing" },
+        ],
+        ariaLabel: "Core files",
+        panelId: "agent-file-panel",
+        variant: "sub",
+        onSelect: vi.fn(),
+      })}
+      <select class="agent-tab-add" aria-label="Add File">
+        <option>Add File</option>
+        <option>MEMORY</option>
+      </select>`,
+    root,
+  );
+  await Promise.resolve();
+  const tabs = root.querySelector<HTMLElement>("[role=tablist]")!;
+  const control = root.querySelector("select")!;
+  const panelBounds = root.getBoundingClientRect();
+  const tabBounds = tabs.getBoundingClientRect();
+  const controlBounds = control.getBoundingClientRect();
+  expect(tabBounds.right).toBeLessThanOrEqual(controlBounds.left);
+  expect(controlBounds.right).toBeLessThanOrEqual(panelBounds.right);
+  expect(tabBounds.width).toBeLessThan(panelBounds.width);
+  expect(tabs.scrollWidth).toBeGreaterThan(tabs.clientWidth);
+});
 
 it("restores keyboard focus when navigation replaces a Solid tab strip with Lit", async () => {
   const root = document.createElement("div");
