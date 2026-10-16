@@ -346,20 +346,16 @@ export function resolveSettledToolTerminalContinuationInstruction(
     terminal.source === "idle" &&
     attempt.currentAttemptReplayMetadata?.hadPotentialSideEffects === true;
   const assistantState = classifyAssistantTurn(params);
-  // Current-attempt lifecycle/metadata also survives transcript projection. A
-  // signed reasoning-only stop is not emptyResponse, and an output limit may
-  // leave no answer after transport markup is removed. Both need the existing
-  // tool-disabled finalizer, never another tool-enabled attempt.
+  // Signed reasoning may have no visible answer without being an empty response.
   const nonVisibleStopAfterSettledTools = Boolean(
     params.allowEmptyStopContinuation &&
-    (attempt.currentAttemptAssistant?.stopReason === "stop" ||
-      attempt.currentAttemptAssistant?.stopReason === "length") &&
+    (assistantState.assistant?.stopReason === "stop" ||
+      assistantState.assistant?.stopReason === "length") &&
     attempt.toolMetas.length > 0 &&
     attempt.toolMetas.every((tool) => tool.isError !== true && tool.asyncStarted !== true) &&
     attempt.itemLifecycle.startedCount > 0 &&
     attempt.itemLifecycle.completedCount === attempt.itemLifecycle.startedCount &&
     attempt.itemLifecycle.activeCount === 0 &&
-    !hasAcceptedSessionSpawn(attempt.acceptedSessionSpawns) &&
     assistantState.visibleText.length === 0,
   );
   if (

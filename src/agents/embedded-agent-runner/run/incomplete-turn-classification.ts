@@ -4,7 +4,6 @@ import { getReplyPayloadMetadata } from "../../../auto-reply/reply-payload.js";
 import { parseReplyDirectives } from "../../../auto-reply/reply/reply-directives.js";
 import type { AssistantMessage } from "../../../llm/types.js";
 import { resolveRawAssistantAnswerText } from "../../../shared/assistant-answer-text.js";
-import { stripToolCallXmlTags } from "../../../shared/text/assistant-visible-text.js";
 import { prepareAgentRunTerminalReply } from "../../agent-run-terminal-reply.js";
 import type { CompletedAssistantAnswer } from "../../embedded-agent-subscribe.handlers.types.js";
 import {
@@ -225,9 +224,7 @@ export function shouldApplyNonVisibleTurnRetryGuard(params: {
     (GEMINI_INCOMPLETE_TURN_PROVIDER_IDS.has(
       normalizeLowercaseStringOrEmpty(params.provider ?? ""),
     ) &&
-      GEMINI_INCOMPLETE_TURN_MODEL_ID_PATTERN.test(
-        stripProviderPrefix(typeof params.modelId === "string" ? params.modelId : ""),
-      )) ||
+      GEMINI_INCOMPLETE_TURN_MODEL_ID_PATTERN.test(stripProviderPrefix(params.modelId ?? ""))) ||
     RETRY_GUARD_MODEL_APIS.has(normalizeLowercaseStringOrEmpty(params.modelApi ?? "")) ||
     isOllamaIncompleteTurnProvider(params.provider)
   );
@@ -256,10 +253,7 @@ export function classifyAssistantTurn(params: {
     : assistant
       ? extractAssistantVisibleText(assistant, (_text, final) => (final ? prepared.text : ""))
       : sanitizeAssistantVisibleStreamText(prepared.text);
-  // A bare unfinished tool-call transport marker is not a visible answer;
-  // strip it before emptiness classification so those stops reach the
-  // settled-turn finalizer instead of looking like delivered text.
-  const visibleText = stripToolCallXmlTags(parseReplyDirectives(renderedText).text).trim();
+  const visibleText = parseReplyDirectives(renderedText).text.trim();
   const reasoningOnly = Boolean(
     assistant && assessLastAssistantMessage(assistant) === "incomplete-text",
   );

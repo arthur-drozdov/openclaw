@@ -293,8 +293,7 @@ function stripToolCallXmlTagsInternal(
   ) {
     return text;
   }
-  // A lone unfinished transport opener is not a visible answer. Keep quoted,
-  // fenced and explanatory examples intact; this exact bare form has no prose.
+  // A lone transport opener is scaffolding; quoted and explanatory mentions stay visible.
   if (/^\s*<tool_call>\s*$/i.test(text)) {
     return "";
   }
