@@ -122,6 +122,7 @@ export function createNewSessionComposerTextarea() {
       skillCommandDraftOwnerKey = draftOwnerKey;
       control.emojiMenu.close();
       control.skillMenu.reset();
+      control.slashMenu.reset();
     },
     ownsSkillCommands(
       client: GatewayBrowserClient | null,
@@ -143,8 +144,6 @@ export function createNewSessionComposerTextarea() {
       skillCommandClient = null;
       skillCommandAgentId = "";
       skillCommandDraftOwnerKey = "";
-      control.skillMenu.reset();
-      control.slashMenu.reset();
       control.capabilityMenuOpen = false;
       control.capabilityMenuView = "root";
       control.ref();
