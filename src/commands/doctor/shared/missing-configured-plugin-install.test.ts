@@ -43,15 +43,15 @@ import {
 } from "./missing-configured-plugin-install.test-helpers.js";
 
 const {
-  expectedNpmInstallSpec,
-  expectedClawHubInstallSpec,
-  expectedCodexInstallSpec,
+  expectedNpmInstallSpec: npmInstallSpec,
+  expectedClawHubInstallSpec: clawhubSpec,
+  expectedCodexInstallSpec: codexSpec,
   mockNpmRegistryTags,
-  expectRecordFields,
-  mockCallArg,
-  expectedIndexWriteOptions,
-  mockCurrentBundledPlugin,
-  repairConfiguredPlugins,
+  expectRecordFields: expectFields,
+  mockCallArg: callArg,
+  expectedIndexWriteOptions: writeOptions,
+  mockCurrentBundledPlugin: bundledPlugin,
+  repairConfiguredPlugins: configuredRepair,
   useRealInstallIndexWrites,
   useManifestCatalogResolvers,
   mockBrokenBraveInstall,
@@ -81,6 +81,27 @@ const installedMessage = (id: string, spec: string) =>
 const refreshedMessage = (id: string, spec: string) =>
   `Refreshed stale configured plugin "${id}" from ${spec}.`;
 
+type RepairResult = Awaited<ReturnType<typeof repairInstalls>>;
+type RepairOptions = Parameters<typeof repairInstalls>[0];
+
+function expectNpm(id: string, spec: string, fields: Record<string, unknown> = {}) {
+  expectFields(callArg(installNpm), { expectedPluginId: id, spec, ...fields });
+}
+
+function expectUnchanged(result: RepairResult, records: unknown = {}) {
+  notCalled(installClawHub, installNpm);
+  expect(result).toEqual({ changes: [], warnings: [], records });
+}
+
+async function runRepair(cfg: RepairOptions["cfg"], options: Omit<RepairOptions, "cfg"> = {}) {
+  return repairInstalls({ cfg, env: testEnv, ...options });
+}
+
+function loadRecords<T>(records: T) {
+  mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue(records);
+  return records;
+}
+
 function notCalled(...callbacks: ReturnType<typeof vi.fn>[]) {
   for (const callback of callbacks) {
     expect(callback).not.toHaveBeenCalled();
@@ -102,8 +123,12 @@ function setOfficial(...entries: Record<string, unknown>[]) {
   mocks.listOfficialExternalPluginCatalogEntries.mockReturnValue(entries);
 }
 
-function catalogChannel(id: string, install: Record<string, unknown>, label: string) {
-  return { id, pluginId: id, meta: { label }, install };
+function catalogChannel(id: string, install: Record<string, unknown>) {
+  return { id, pluginId: id, meta: { label: id }, install };
+}
+
+function official(id: string, npmSpec: string, manifest?: Record<string, unknown>) {
+  return officialPluginEntry({ id, npmSpec, manifest });
 }
 
 function npmRecords(
@@ -144,14 +169,14 @@ function coldFixture(
 
 function bundledDemo(bundledRoot?: string) {
   setChannels({
-    ...catalogChannel("bundleddemo", { npmSpec: BUNDLED }, "Matrix"),
+    ...catalogChannel("bundleddemo", { npmSpec: BUNDLED }),
     origin: "bundled",
   });
   metadata(
     [{ id: "bundleddemo", origin: "bundled", packageName: BUNDLED, channels: ["bundleddemo"] }],
     [{ pluginId: "bundleddemo", message: "manifest without channelConfigs metadata" }],
   );
-  mockCurrentBundledPlugin("bundleddemo", BUNDLED, bundledRoot);
+  bundledPlugin("bundleddemo", BUNDLED, bundledRoot);
   return {
     plugins: { entries: { bundleddemo: { enabled: true } } },
     channels: { bundleddemo: { enabled: true, homeserver: "https://bundleddemo.example.org" } },
@@ -230,7 +255,7 @@ function installedCodex(version: string, spec = CODEX, readFromDisk = false) {
   const writePackageVersion = (next: string) =>
     fs.writeFileSync(packageFile, JSON.stringify({ name: CODEX, version: next }));
   writePackageVersion(version);
-  const records = {
+  const records = loadRecords({
     codex: {
       source: "npm",
       spec,
@@ -241,8 +266,7 @@ function installedCodex(version: string, spec = CODEX, readFromDisk = false) {
       integrity: "sha512-old-codex",
       installPath: installDir,
     },
-  };
-  mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue(records);
+  });
   const snapshot = () => {
     const current = readFromDisk
       ? (JSON.parse(readText(packageFile)) as { version: string }).version
@@ -278,11 +302,10 @@ describe("repairMissingConfiguredPluginInstalls", () => {
     fs.rmSync(path.join(installDir, "package.json"));
     const originalFiles = fileBytes(installDir);
     const record = { source: "npm" as const, spec: "@example/demo", installPath: installDir };
-    const records = { demo: record, alias: { ...record } };
+    const records = loadRecords({ demo: record, alias: { ...record } });
     const originalRecords = structuredClone(records);
     const cfg = pluginEntries("demo", "later");
     const originalConfig = structuredClone(cfg);
-    mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue(records);
     metadata([], [], { plugins: [] });
     setChannels(
       channelPluginEntry({ id: "demo", npmSpec: "@example/demo" }),
@@ -313,7 +336,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
     const onWarning = vi.fn();
 
     await expect(
-      repairInstalls({ cfg, env: testEnv, onCapabilityConsent, beforePersistentEffect, onWarning }),
+      runRepair(cfg, { onCapabilityConsent, beforePersistentEffect, onWarning }),
     ).rejects.toMatchObject({
       name: "ManagedPluginLifecycleError",
       kind: "invalid-request",
@@ -347,26 +370,27 @@ describe("repairMissingConfiguredPluginInstalls", () => {
           widened ? ["fixture.read", "fixture.write"] : ["fixture.read"],
         );
       }
-      const records = installedRecords("codex", {
-        spec: CODEX,
-        resolvedSpec: "@openclaw/codex@2026.5.6",
-        resolvedVersion: "2026.5.6",
-        integrity: "sha512-previous",
-        installPath: installDir,
-        ...(previousState === "accepted"
-          ? {
-              acceptedSurface: resolvePluginArtifactDeclaredSurface(installDir),
-              acceptedSurfaceHash: computeDeclaredSurfaceHash(
-                resolvePluginArtifactDeclaredSurface(installDir),
-              ),
-              acceptedSurfaceAt: "2026-01-01T00:00:00.000Z",
-              acceptedSurfaceIntegrity: "sha512-previous",
-            }
-          : {}),
-      });
+      const records = loadRecords(
+        installedRecords("codex", {
+          spec: CODEX,
+          resolvedSpec: "@openclaw/codex@2026.5.6",
+          resolvedVersion: "2026.5.6",
+          integrity: "sha512-previous",
+          installPath: installDir,
+          ...(previousState === "accepted"
+            ? {
+                acceptedSurface: resolvePluginArtifactDeclaredSurface(installDir),
+                acceptedSurfaceHash: computeDeclaredSurfaceHash(
+                  resolvePluginArtifactDeclaredSurface(installDir),
+                ),
+                acceptedSurfaceAt: "2026-01-01T00:00:00.000Z",
+                acceptedSurfaceIntegrity: "sha512-previous",
+              }
+            : {}),
+        }),
+      );
       const originalRecords = structuredClone(records);
       const originalFiles = fileBytes(installDir);
-      mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue(records);
       metadata(
         [{ id: "codex", packageVersion: "2026.5.6", channels: ["codex"] }],
         previousState === "stale-descriptor"
@@ -374,7 +398,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
           : [],
         { plugins: [] },
       );
-      setOfficial(officialPluginEntry({ id: "codex", npmSpec: CODEX }));
+      setOfficial(official("codex", CODEX));
       let committed = false;
       installNpm.mockImplementation(
         async (params: { onBeforePluginArtifactCommit: PluginInstallArtifactConsentHandler }) => {
@@ -398,7 +422,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       expect(result.records).toBe(records);
       expect(result.records).toEqual(originalRecords);
       expectFiles(installDir, originalFiles);
-      expectRecordFields(result, {
+      expectFields(result, {
         failedPluginIds: ["codex"],
         repairedPluginIds: undefined,
         pluginInventoryChanged: undefined,
@@ -407,7 +431,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       expect(cfg.plugins?.entries?.codex?.enabled).toBe(true);
       const accepted = previousState === "accepted";
       const reviewNotice = [expect.stringContaining("--accept-capabilities")];
-      expectRecordFields(result, {
+      expectFields(result, {
         warnings: accepted ? [] : reviewNotice,
         notices: accepted ? reviewNotice : undefined,
         outcomes: accepted ? undefined : [consentFailure("codex")],
@@ -457,10 +481,10 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       }),
     );
 
-    const result = await repairConfiguredPlugins(pluginEntries("demo", "sibling"));
+    const result = await configuredRepair(pluginEntries("demo", "sibling"));
 
     expect(result.records.demo).toBe(records.demo);
-    expectRecordFields(result, {
+    expectFields(result, {
       records: { ...records, sibling: updatedSibling },
       warnings: ["Review replacement capabilities."],
       outcomes: [refusal],
@@ -597,7 +621,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       expect(repair.warnings).toContain(
         'Failed to install missing configured plugin "other" from @example/other@1.0.0: Fixture installer failed for other.',
       );
-      expectRecordFields(repair, {
+      expectFields(repair, {
         repairedPluginIds: ["demo"],
         failedPluginIds: ["other"],
         outcomes: [consentFailure("other")],
@@ -631,7 +655,6 @@ describe("repairMissingConfiguredPluginInstalls", () => {
           source === "clawhub"
             ? { clawhubSpec: `clawhub:${packageName}@1.0.0` }
             : { npmSpec: `${packageName}@1.0.0`, defaultChoice: "npm" },
-          "Matrix",
         ),
       );
       let committed = false;
@@ -669,7 +692,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       expect(fs.existsSync(fixture.runtimeMarker)).toBe(false);
       if (accepted) {
         expect(consent).toHaveBeenCalledOnce();
-        expectRecordFields(result, { outcomes: undefined, warnings: [] });
+        expectFields(result, { outcomes: undefined, warnings: [] });
         expect(result.records.matrix).toMatchObject({
           acceptedSurface: { tools: ["matrix.write"] },
           acceptedSurfaceHash: expect.stringMatching(/^[a-f\d]{64}$/),
@@ -677,7 +700,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
         });
         expect(persistRecords).toHaveBeenCalledWith(result.records, expect.any(Object));
       } else {
-        expectRecordFields(result, { records: {}, failedPluginIds: ["matrix"] });
+        expectFields(result, { records: {}, failedPluginIds: ["matrix"] });
         expect(result.warnings.join("\n")).toMatch(/capabilit/i);
         expect(result.outcomes).toEqual([consentFailure("matrix")]);
         expect(persistRecords).not.toHaveBeenCalled();
@@ -758,16 +781,14 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       code: "version_not_found",
       error: "Version not found on ClawHub: @openclaw/plugin-matrix@beta.",
     });
-    setChannels(
-      catalogChannel("matrix", { clawhubSpec: "clawhub:@openclaw/plugin-matrix" }, "Matrix"),
-    );
+    setChannels(catalogChannel("matrix", { clawhubSpec: "clawhub:@openclaw/plugin-matrix" }));
 
-    const result = await repairInstalls({ cfg, env: testEnv });
+    const result = await runRepair(cfg);
 
-    expect(mockCallArg(installClawHub, 0)).toMatchObject({
+    expect(callArg(installClawHub, 0)).toMatchObject({
       spec: "clawhub:@openclaw/plugin-matrix@beta",
     });
-    expect(mockCallArg(installClawHub, 1)).toMatchObject({
+    expect(callArg(installClawHub, 1)).toMatchObject({
       spec: "clawhub:@openclaw/plugin-matrix",
     });
     expect(result.notices).toEqual(
@@ -798,16 +819,13 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       },
     );
     setChannels(
-      catalogChannel("matrix", { clawhubSpec: "clawhub:@openclaw/plugin-matrix@stable" }, "Matrix"),
+      catalogChannel("matrix", { clawhubSpec: "clawhub:@openclaw/plugin-matrix@stable" }),
     );
 
-    const result = await repairInstalls({
-      cfg,
-      env: { ...testEnv, OPENCLAW_UPDATE_IN_PROGRESS: "1" },
-    });
+    const result = await runRepair(cfg, { env: { ...testEnv, OPENCLAW_UPDATE_IN_PROGRESS: "1" } });
 
-    const clawHubCall = expectRecordFields(mockCallArg(installClawHub), {
-      spec: expectedClawHubInstallSpec("clawhub:@openclaw/plugin-matrix@stable"),
+    const clawHubCall = expectFields(callArg(installClawHub), {
+      spec: clawhubSpec("clawhub:@openclaw/plugin-matrix@stable"),
       expectedPluginId: "matrix",
       config: cfg,
     });
@@ -862,7 +880,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
   it("installs a missing channel plugin selected by environment config from npm", async () => {
     installNpm.mockResolvedValueOnce(artifact("matrix", MATRIX, "1.2.3"));
     setChannels({
-      ...catalogChannel("matrix", { npmSpec: `${MATRIX}@1.2.3` }, "Matrix"),
+      ...catalogChannel("matrix", { npmSpec: `${MATRIX}@1.2.3` }),
       trustedSourceLinkedOfficialInstall: true,
     });
 
@@ -872,23 +890,18 @@ describe("repairMissingConfiguredPluginInstalls", () => {
     });
 
     expect(installClawHub).not.toHaveBeenCalled();
-    expectRecordFields(mockCallArg(installNpm), {
-      spec: "@openclaw/plugin-matrix@1.2.3",
+    expectNpm("matrix", `${MATRIX}@1.2.3`, {
       extensionsDir: "/tmp/openclaw-plugins",
-      expectedPluginId: "matrix",
       trustedSourceLinkedOfficialInstall: true,
     });
-    const records = mockCallArg(persistRecords);
-    expectRecordFields((records as Record<string, unknown>).matrix, {
+    const records = callArg(persistRecords);
+    expectFields((records as Record<string, unknown>).matrix, {
       source: "npm",
       spec: "@openclaw/plugin-matrix@1.2.3",
       installPath: "/tmp/openclaw-plugins/matrix",
     });
-    expect(mockCallArg(persistRecords, 0, 1)).toEqual(
-      expectedIndexWriteOptions(
-        {},
-        { ...testEnv, MATRIX_HOMESERVER: "https://matrix.example.org" },
-      ),
+    expect(callArg(persistRecords, 0, 1)).toEqual(
+      writeOptions({}, { ...testEnv, MATRIX_HOMESERVER: "https://matrix.example.org" }),
     );
     expect(result.changes).toEqual([installedMessage("matrix", "@openclaw/plugin-matrix@1.2.3")]);
     expect(result.warnings).toStrictEqual([]);
@@ -965,25 +978,19 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       ]);
       notCalled(installNpm, persistRecords);
 
-      const result = await repairConfiguredPlugins(config, env);
+      const result = await configuredRepair(config, env);
       expect(result.warnings).toEqual([]);
       if (installed) {
         expect(result.records).toEqual(records);
         notCalled(installNpm, persistRecords);
       } else {
-        expectRecordFields(mockCallArg(installNpm), {
-          spec: expectedSpec,
-          expectedPluginId: pluginId,
-        });
-        expectRecordFields(result.records[pluginId], {
+        expectNpm(pluginId, expectedSpec);
+        expectFields(result.records[pluginId], {
           spec: packageName,
           resolvedVersion: expectedVersion,
           resolvedSpec: `${packageName}@${expectedVersion}`,
         });
-        expect(persistRecords).toHaveBeenCalledWith(
-          result.records,
-          expectedIndexWriteOptions(config, env),
-        );
+        expect(persistRecords).toHaveBeenCalledWith(result.records, writeOptions(config, env));
       }
     },
   );
@@ -1006,12 +1013,10 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       },
     ],
   ])("does not install channel plugins for a %s", async (_label, cfg) => {
-    setChannels(catalogChannel("matrix", { npmSpec: "@openclaw/plugin-matrix@1.2.3" }, "Matrix"));
+    setChannels(catalogChannel("matrix", { npmSpec: "@openclaw/plugin-matrix@1.2.3" }));
 
-    const result = await repairInstalls({ cfg, env: testEnv });
-
-    notCalled(installClawHub, installNpm, persistRecords);
-    expect(result).toEqual({ changes: [], warnings: [], records: {} });
+    expectUnchanged(await runRepair(cfg));
+    notCalled(persistRecords);
   });
 
   it("removes stale managed install records when the configured plugin is bundled", async () => {
@@ -1022,19 +1027,15 @@ describe("repairMissingConfiguredPluginInstalls", () => {
     const bundledRoot = path.join(sourceRoot, "dist", "extensions", "bundleddemo");
     fs.mkdirSync(bundledRoot, { recursive: true });
     const env = { ...testEnv, OPENCLAW_DEV_SOURCE_ROOT: sourceRoot };
-    const records = {
+    loadRecords({
       bundleddemo: { source: "npm", spec: BUNDLED, installPath: "/missing/bundleddemo" },
-    };
-    mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue(records);
+    });
     const cfg = bundledDemo(bundledRoot);
 
-    const result = await repairInstalls({ cfg, env });
+    const result = await runRepair(cfg, { env });
 
     notCalled(mocks.updateNpmInstalledPlugins, installClawHub, installNpm);
-    expect(persistRecords).toHaveBeenCalledWith(
-      {},
-      expectedIndexWriteOptions(expect.any(Object), env),
-    );
+    expect(persistRecords).toHaveBeenCalledWith({}, writeOptions(expect.any(Object), env));
     expect(result).toEqual({
       changes: ['Removed stale managed install record for bundled plugin "bundleddemo".'],
       warnings: [],
@@ -1050,10 +1051,11 @@ describe("repairMissingConfiguredPluginInstalls", () => {
     writeStub(repairedPath, "@openclaw/google-meet");
     fs.mkdirSync(installPath);
 
-    const records = npmRecords("google-meet", "@openclaw/google-meet", installPath, {
-      resolvedName: "@openclaw/google-meet",
-    });
-    mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue(records);
+    const records = loadRecords(
+      npmRecords("google-meet", "@openclaw/google-meet", installPath, {
+        resolvedName: "@openclaw/google-meet",
+      }),
+    );
     const repairedRecords = {
       "google-meet": { ...records["google-meet"], installPath: repairedPath },
     };
@@ -1061,7 +1063,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       successfulUpdate("google-meet", repairedRecords),
     );
     metadata([{ id: "google-meet", origin: "npm", packageName: "@openclaw/google-meet" }], []);
-    mockCurrentBundledPlugin("google-meet", "@openclaw/google-meet");
+    bundledPlugin("google-meet", "@openclaw/google-meet");
     setOfficial({
       id: "google-meet",
       label: "Google Meet",
@@ -1069,11 +1071,11 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       openclaw: { id: "google-meet", install: { npmSpec: "@openclaw/google-meet" } },
     });
 
-    const result = await repairInstalls({ cfg: configuredPlugin("google-meet"), env: testEnv });
+    const result = await runRepair(configuredPlugin("google-meet"));
 
     expect(installNpm).not.toHaveBeenCalled();
     expect(mocks.updateNpmInstalledPlugins).toHaveBeenCalledOnce();
-    expectRecordFields(result, {
+    expectFields(result, {
       records: repairedRecords,
       changes: ['Repaired missing configured plugin "google-meet".'],
       warnings: [],
@@ -1089,14 +1091,11 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       installPath: "/missing/bundleddemo-fork",
     };
 
-    const records = { bundleddemo: record };
-    mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue(records);
+    const records = loadRecords({ bundleddemo: record });
     const cfg = bundledDemo();
 
-    const result = await repairInstalls({ cfg, env: testEnv });
-
-    notCalled(mocks.updateNpmInstalledPlugins, installClawHub, installNpm, persistRecords);
-    expect(result).toEqual({ changes: [], warnings: [], records });
+    expectUnchanged(await runRepair(cfg), records);
+    notCalled(mocks.updateNpmInstalledPlugins, persistRecords);
   });
 
   it.each(["legacy", "project"] as const)(
@@ -1125,7 +1124,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       ).map(([rootDir, packageVersion]) => {
         return coldFixture(rootDir, "codex", packageName, packageVersion, ["fixture.read"]);
       });
-      setOfficial(officialPluginEntry({ id: "codex", npmSpec }));
+      setOfficial(official("codex", npmSpec));
       const integrity = "sha512-verified-codex";
       installNpm.mockImplementation(
         async (params: {
@@ -1178,7 +1177,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
         }),
       ).toBe(true);
       expect(installNpm).toHaveBeenCalledOnce();
-      expectRecordFields(mockCallArg(installNpm), {
+      expectFields(callArg(installNpm), {
         spec: `${packageName}@${version}`,
         mode: "update",
         trustedSourceLinkedOfficialInstall: true,
@@ -1190,10 +1189,9 @@ describe("repairMissingConfiguredPluginInstalls", () => {
   );
 
   it("defers recorded channel-selected package repair during updates", async () => {
-    const records = npmRecords("discord", "@openclaw/discord", "/missing/discord");
-    mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue(records);
-    setChannels(catalogChannel("discord", { npmSpec: "@openclaw/discord" }, "Discord"));
-    const result = await repairConfiguredPlugins(
+    const records = loadRecords(npmRecords("discord", "@openclaw/discord", "/missing/discord"));
+    setChannels(catalogChannel("discord", { npmSpec: "@openclaw/discord" }));
+    const result = await configuredRepair(
       { channels: { discord: { enabled: true, token: "secret" } } },
       {
         OPENCLAW_UPDATE_IN_PROGRESS: "1",
@@ -1212,15 +1210,14 @@ describe("repairMissingConfiguredPluginInstalls", () => {
   });
 
   it("does not install configured plugins when plugins are globally disabled", async () => {
-    const records = {
+    const records = loadRecords({
       brave: { source: "npm" as const, spec: BRAVE, installPath: "/tmp/openclaw-plugins/brave" },
       discord: {
         source: "npm" as const,
         spec: "@openclaw/discord",
         installPath: "/tmp/openclaw-plugins/discord",
       },
-    };
-    mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue(records);
+    });
     mocks.loadPluginMetadataSnapshot.mockReturnValue({
       plugins: [],
       diagnostics: [
@@ -1236,7 +1233,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
         { pluginId: "discord", status: "skipped", message: "disabled" },
       ],
     });
-    setChannels(catalogChannel("matrix", { npmSpec: "@openclaw/plugin-matrix@1.2.3" }, "Matrix"));
+    setChannels(catalogChannel("matrix", { npmSpec: "@openclaw/plugin-matrix@1.2.3" }));
     setOfficial(
       { id: "codex", label: "Codex", install: { npmSpec: CODEX, defaultChoice: "npm" } },
       {
@@ -1251,22 +1248,21 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       channels: { matrix: { homeserver: "https://matrix.example.org" } },
       agents: { defaults: { agentRuntime: { id: "codex" } } },
     };
-    const result = await repairInstalls({ cfg, env: testEnv });
+    const result = await runRepair(cfg);
 
     expect(mocks.updateNpmInstalledPlugins).toHaveBeenCalledWith(
       expect.objectContaining({ pluginIds: ["brave", "discord"], skipDisabledPlugins: true }),
     );
-    notCalled(installClawHub, installNpm);
-    expect(result).toEqual({ changes: [], warnings: [], records });
+    expectUnchanged(result, records);
   });
 
   it("installs a selected runtime from its built-in fallback when no catalog entry exists", async () => {
     installNpm.mockResolvedValueOnce(artifact("codex", CODEX, VERSION));
-    const result = await repairConfiguredPlugins({
+    const result = await configuredRepair({
       agents: { defaults: { model: "openai/gpt-5.5" } },
     });
     expect(installNpm).toHaveBeenCalledWith(
-      expect.objectContaining({ expectedPluginId: "codex", spec: expectedCodexInstallSpec() }),
+      expect.objectContaining({ expectedPluginId: "codex", spec: codexSpec() }),
     );
     expect(result.records.codex).toMatchObject({ spec: CODEX, version: VERSION });
     expect(result.warnings).toEqual([]);
@@ -1275,13 +1271,10 @@ describe("repairMissingConfiguredPluginInstalls", () => {
   it.each(["disabled", "bundled"] as const)(
     "does not select npm targets for a %s configured plugin",
     async (kind) => {
-      const records = npmRecords("fixture", "@example/fixture@1.0.0", process.cwd(), {
-        source: "npm",
-      });
-      mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue(records);
+      loadRecords(npmRecords("fixture", "@example/fixture@1.0.0", process.cwd()));
       metadata([{ id: "fixture", channels: [] }], []);
       if (kind === "bundled") {
-        mockCurrentBundledPlugin("fixture", "@example/fixture");
+        bundledPlugin("fixture", "@example/fixture");
       }
       await expect(
         collectConfiguredNpmPluginTargets({
@@ -1319,9 +1312,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
 
     expect(mocks.resolveDirectBundledProviderPolicySurface).toHaveBeenCalledWith("openai");
     expect(mocks.updateNpmInstalledPlugins).not.toHaveBeenCalled();
-    expectRecordFields(mockCallArg(installNpm), {
-      spec: `@openclaw/codex@${coreVersion}`,
-      expectedPluginId: "codex",
+    expectNpm("codex", `${CODEX}@${coreVersion}`, {
       trustedSourceLinkedOfficialInstall: true,
       mode: "update",
       expectedIntegrity,
@@ -1335,7 +1326,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
     );
     expect(installClawHub).not.toHaveBeenCalled();
     expect(result.changes).toEqual([refreshedMessage("codex", `${CODEX}@${coreVersion}`)]);
-    expectRecordFields(result.records.codex, {
+    expectFields(result.records.codex, {
       source: "npm",
       spec: expectedSpec,
       installPath: "/tmp/openclaw-plugins/codex",
@@ -1382,7 +1373,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
         writePackageVersion(selectedVersion);
         return artifact("codex", CODEX, selectedVersion, installDir);
       });
-      setOfficial(officialPluginEntry({ id: "codex", npmSpec: CODEX }));
+      setOfficial(official("codex", CODEX));
       const params = {
         cfg: {
           update: { channel: "beta" as const },
@@ -1394,13 +1385,11 @@ describe("repairMissingConfiguredPluginInstalls", () => {
 
       if (refresh) {
         expect(installNpm).toHaveBeenCalledOnce();
-        expectRecordFields(mockCallArg(installNpm), {
-          spec: `@openclaw/codex@${selectedVersion}`,
-          expectedPluginId: "codex",
+        expectNpm("codex", `${CODEX}@${selectedVersion}`, {
           trustedSourceLinkedOfficialInstall: true,
           mode: "update",
         });
-        expectRecordFields(firstPass, {
+        expectFields(firstPass, {
           changes: [refreshedMessage("codex", `${CODEX}@${selectedVersion}`)],
           pluginInventoryChanged: true,
         });
@@ -1412,7 +1401,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
             `Plugin "codex" refresh: tag-behind-latest; beta follows latest ${selectedVersion}.`,
           );
         }
-        expectRecordFields(firstPass.records.codex, {
+        expectFields(firstPass.records.codex, {
           source: "npm",
           spec: CODEX,
           installPath: installDir,
@@ -1423,7 +1412,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       } else {
         notCalled(installNpm, persistRecords);
         expect(firstPass.records).toBe(records);
-        expectRecordFields(firstPass, {
+        expectFields(firstPass, {
           changes: [],
           pluginInventoryChanged: undefined,
           repairedPluginIds: undefined,
@@ -1441,17 +1430,17 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       expect(firstPass.warnings).toEqual([]);
       installNpm.mockClear();
       persistRecords.mockClear();
-      mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue(firstPass.records);
+      loadRecords(firstPass.records);
 
       const secondPass = await repairInstalls(params);
 
       notCalled(installNpm, persistRecords);
-      expectRecordFields(secondPass, { changes: [], warnings: firstPass.warnings });
+      expectFields(secondPass, { changes: [], warnings: firstPass.warnings });
       if (registryUnavailable) {
         expect(secondPass.notices).toEqual(firstPass.notices);
       }
       expect(secondPass.records).toBe(firstPass.records);
-      expectRecordFields(secondPass, {
+      expectFields(secondPass, {
         pluginInventoryChanged: undefined,
         repairedPluginIds: undefined,
       });
@@ -1459,7 +1448,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
   );
 
   it("does not install a blocked downloadable plugin from explicit channel ids", async () => {
-    setChannels(catalogChannel("matrix", { npmSpec: "@openclaw/plugin-matrix@1.2.3" }, "Matrix"));
+    setChannels(catalogChannel("matrix", { npmSpec: "@openclaw/plugin-matrix@1.2.3" }));
 
     const result = await repairMissingPluginInstallsForIds({
       cfg: {},
@@ -1469,8 +1458,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       env: testEnv,
     });
 
-    notCalled(installClawHub, installNpm);
-    expect(result).toEqual({ changes: [], warnings: [], records: {} });
+    expectUnchanged(result);
   });
 
   it("does not install a channel catalog plugin when a configured plugin already owns that channel", async () => {
@@ -1486,7 +1474,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       diagnostics: [],
     });
     setChannels({
-      ...catalogChannel("feishu", { npmSpec: "@openclaw/feishu" }, "Feishu"),
+      ...catalogChannel("feishu", { npmSpec: "@openclaw/feishu" }),
       trustedSourceLinkedOfficialInstall: true,
     });
     const result = await repairInstalls({
@@ -1497,8 +1485,8 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       env: testEnv,
     });
 
-    notCalled(installClawHub, installNpm, persistRecords);
-    expect(result).toEqual({ changes: [], warnings: [], records: {} });
+    expectUnchanged(result);
+    notCalled(persistRecords);
   });
 
   it.each(["npm", "clawhub"] as const)(
@@ -1517,7 +1505,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
           "│ Outcome: Review                                        │\n" +
           "╰───────────────────────────────────────────────────────────────────────╯"
         : 'Could not repair openclaw peer link for "demo" at /tmp/openclaw-plugins/demo: permission denied';
-      mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue({ demo: record });
+      loadRecords({ demo: record });
       mocks.updateNpmInstalledPlugins.mockImplementationOnce(
         async (params: { logger?: { warn?: (message: string) => void } }) => {
           params.logger?.warn?.(notice ? `\u001b[33m${message}\u001b[39m` : message);
@@ -1527,11 +1515,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
         },
       );
       const onWarning = vi.fn();
-      const result = await repairInstalls({
-        cfg: configuredPlugin("demo"),
-        env: testEnv,
-        onWarning,
-      });
+      const result = await runRepair(configuredPlugin("demo"), { onWarning });
       if (notice) {
         expect(result.notices).toContain(message);
         expect(result.notices?.[0]).not.toContain("\u001b");
@@ -1576,18 +1560,16 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       successfulInstall({ pluginId, npmSpec, version: "2026.5.12", targetDir }),
     );
 
-    const result = await repairConfiguredPlugins(cfg);
+    const result = await configuredRepair(cfg);
 
     expect(mocks.updateNpmInstalledPlugins).not.toHaveBeenCalled();
     expect(fs.existsSync(installDir)).toBe(false);
-    expectRecordFields(mockCallArg(installNpm), {
-      spec: priorSpec,
-      expectedPluginId: pluginId,
+    expectNpm(pluginId, priorSpec, {
       trustedSourceLinkedOfficialInstall: true,
       mode: "update",
     });
-    const persistedRecords = mockCallArg(persistRecords) as Record<string, unknown>;
-    expectRecordFields(persistedRecords[pluginId], {
+    const persistedRecords = callArg(persistRecords) as Record<string, unknown>;
+    expectFields(persistedRecords[pluginId], {
       source: "npm",
       spec: priorSpec,
       installPath: targetDir,
@@ -1614,7 +1596,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
     });
     installNpm.mockResolvedValueOnce(artifact("brave", BRAVE, "2026.5.12"));
 
-    await repairConfiguredPlugins({ tools: { web: { search: { provider: "brave" } } } });
+    await configuredRepair({ tools: { web: { search: { provider: "brave" } } } });
 
     expect(fs.existsSync(installDir)).toBe(true);
     expect(installNpm).toHaveBeenCalled();
@@ -1843,7 +1825,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
           await expect(operation).rejects.toBe(failure);
         } else {
           const result = await operation;
-          expectRecordFields(result, {
+          expectFields(result, {
             repairedPluginIds: ["brave"],
             warnings:
               phase === "cleanup-failure"
@@ -1920,7 +1902,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
     writeStub(installDir, "brave");
     const records = mockBrokenBraveInstall(installDir, { source: "path", sourcePath: installDir });
 
-    const result = await repairConfiguredPlugins({
+    const result = await configuredRepair({
       tools: { web: { search: { provider: "brave" } } },
     });
 
@@ -1935,7 +1917,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       ["gradium", "@openclaw/gradium-speech"],
       ["inworld", "@openclaw/inworld-speech"],
     ] as const;
-    setOfficial(...packages.map(([id, npmSpec]) => officialPluginEntry({ id, npmSpec })));
+    setOfficial(...packages.map(([id, npmSpec]) => official(id, npmSpec)));
     mocks.resolveOfficialExternalProviderContractPluginIds.mockImplementation(
       ({ contract }: { contract: string }) => {
         if (contract === "webFetchProviders") {
@@ -1951,7 +1933,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       installNpm.mockResolvedValueOnce(artifact(pluginId, npmSpec));
     }
 
-    const result = await repairConfiguredPlugins({
+    const result = await configuredRepair({
       tts: { provider: "gradium", providers: { inworld: {} } },
       tools: { web: { fetch: { provider: "firecrawl" } } },
     });
@@ -1962,9 +1944,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       ),
     ).toEqual(["firecrawl", "gradium", "inworld"]);
     expect(result.changes).toEqual(
-      packages.map(([pluginId, npmSpec]) =>
-        installedMessage(pluginId, expectedNpmInstallSpec(npmSpec)),
-      ),
+      packages.map(([pluginId, npmSpec]) => installedMessage(pluginId, npmInstallSpec(npmSpec))),
     );
   });
 
@@ -2001,15 +1981,13 @@ describe("repairMissingConfiguredPluginInstalls", () => {
     setOfficial(entry);
     installNpm.mockResolvedValueOnce(artifact(pluginId, npmSpec, version));
 
-    const result = await repairConfiguredPlugins(cfg);
+    const result = await configuredRepair(cfg);
 
-    expectRecordFields(mockCallArg(installNpm), {
-      spec: expectedNpmInstallSpec(npmSpec),
-      expectedPluginId: pluginId,
+    expectNpm(pluginId, npmInstallSpec(npmSpec), {
       trustedSourceLinkedOfficialInstall: true,
     });
     expect(installClawHub).not.toHaveBeenCalled();
-    expect(result.changes).toEqual([installedMessage(pluginId, expectedNpmInstallSpec(npmSpec))]);
+    expect(result.changes).toEqual([installedMessage(pluginId, npmInstallSpec(npmSpec))]);
   });
 
   it("does not install an env-selected denied search plugin", async () => {
@@ -2032,21 +2010,12 @@ describe("repairMissingConfiguredPluginInstalls", () => {
       ),
     );
     useManifestCatalogResolvers();
-    installNpm.mockImplementation(async ({ expectedPluginId }: { expectedPluginId: string }) =>
-      successfulInstall({
-        pluginId: expectedPluginId,
-        npmSpec: expectDefined(
-          packages.find(([id]) => id === expectedPluginId),
-          "expected search plugin package",
-        )[1],
-      }),
-    );
 
-    const result = await repairConfiguredPlugins(cfg, env);
+    const result = await configuredRepair(cfg, env);
 
     notCalled(installNpm, installClawHub);
     expect(Object.keys(result.records)).toEqual([]);
-    expectRecordFields(result, { changes: [], warnings: [] });
+    expectFields(result, { changes: [], warnings: [] });
     expect(persistRecords).not.toHaveBeenCalled();
   });
 
@@ -2062,7 +2031,7 @@ describe("repairMissingConfiguredPluginInstalls", () => {
     fs.mkdirSync(pluginDir, { recursive: true });
     fs.writeFileSync(sourcePath, source);
 
-    const result = await repairConfiguredPlugins({
+    const result = await configuredRepair({
       plugins: { load: { paths: [pluginDir] }, entries: { "guardrail-bridge": { enabled: true } } },
     });
 
@@ -2086,23 +2055,16 @@ describe("repairMissingConfiguredPluginInstalls", () => {
     );
 
     const env = { FIRECRAWL_API_KEY: "firecrawl-key" };
-    const result = await repairConfiguredPlugins(
-      { tools: { web: { search: { enabled: false } } } },
-      env,
-    );
+    const result = await configuredRepair({ tools: { web: { search: { enabled: false } } } }, env);
 
     expect(mocks.resolveOfficialExternalWebProviderContractPluginIdsForEnv).toHaveBeenCalledWith({
       contract: "webFetchProviders",
       env: { ...testEnv, ...env },
     });
-    expectRecordFields(mockCallArg(installNpm), {
-      spec: expectedNpmInstallSpec(FIRECRAWL),
-      expectedPluginId: "firecrawl",
+    expectNpm("firecrawl", npmInstallSpec(FIRECRAWL), {
       trustedSourceLinkedOfficialInstall: true,
     });
-    expect(result.changes).toEqual([
-      installedMessage("firecrawl", expectedNpmInstallSpec(FIRECRAWL)),
-    ]);
+    expect(result.changes).toEqual([installedMessage("firecrawl", npmInstallSpec(FIRECRAWL))]);
   });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

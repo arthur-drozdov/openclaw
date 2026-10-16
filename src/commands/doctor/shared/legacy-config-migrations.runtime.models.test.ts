@@ -1,8 +1,7 @@
-import { expectDefined } from "@openclaw/normalization-core";
-import { it, expect } from "vitest";
+import { assert, it, expect } from "vitest";
 import { createModelVisibilityPolicy } from "../../../agents/model-visibility-policy.js";
 import { findLegacyConfigIssues } from "../../../config/legacy.js";
-import type { OpenClawConfig } from "../../../config/types.js";
+import type { AgentModelEntryConfig as ModelEntry } from "../../../config/types.js";
 import { validateConfigObjectRaw } from "../../../config/validation-core.js";
 import {
   collectBlockedLegacyOpenAICodexProviderPlan,
@@ -10,10 +9,9 @@ import {
 } from "./legacy-config-migrations.runtime.models.js";
 
 function migration(id: string) {
-  return expectDefined(
-    migrations.find((entry) => entry.id === id),
-    id,
-  );
+  const entry = migrations.find((candidate) => candidate.id === id);
+  assert(entry, `Missing migration: ${id}`);
+  return entry;
 }
 
 function apply(migrate: ReturnType<typeof migration>, raw: Record<string, unknown>) {
@@ -36,7 +34,7 @@ function route(api: string, baseUrl: string, id: string, compat: Record<string, 
   return { api, baseUrl, models: [{ id, compat }] };
 }
 
-function allowConfig(models: Record<string, unknown>, modelPolicy?: { allow: string[] }) {
+function allowConfig(models: Record<string, ModelEntry>, modelPolicy?: { allow: string[] }) {
   return { agents: { defaults: { models, ...(modelPolicy ? { modelPolicy } : {}) } } };
 }
 
@@ -83,32 +81,25 @@ it("strips matching and dead compat overrides while preserving divergences", () 
 });
 
 it("preserves live compat for custom models and routes", () => {
+  const proxy = "http://127.0.0.1:9000/v1";
   const raw = providerConfig({
-    anthropic: route("anthropic-messages", "http://127.0.0.1:9200/v1", "claude-haiku-4-5", {
-      codeMode: "capable",
-    }),
-    custom: route("openai-completions", "http://127.0.0.1:9000/v1", "local-model", {
-      supportsTools: false,
-    }),
-    openai: route("openai-responses", "http://127.0.0.1:9100/v1", "gpt-5.6", {
-      supportsReasoningEffort: true,
-    }),
+    anthropic: route("anthropic-messages", proxy, "claude-haiku-4-5", { codeMode: "capable" }),
+    custom: route("openai-completions", proxy, "local-model", { supportsTools: false }),
+    openai: route("openai-responses", proxy, "gpt-5.6", { supportsReasoningEffort: true }),
   });
   expectUnchanged(compatMigration, raw);
 });
 
 const allowMigration = migration("agents.defaults.models->agents.defaults.modelPolicy.allow");
 it("defers the entire mixed restriction without opening model access", () => {
-  const raw: OpenClawConfig = {
-    agents: {
-      defaults: { models: { bare: {}, "demo/*": {} } },
-      ownership: "explicit",
-      entries: {
-        first: { models: { "first/bare": {} } },
-        second: { models: { "second/bare": {} } },
-      },
+  const raw = allowConfig({ bare: {}, "demo/*": {} });
+  Object.assign(raw.agents, {
+    ownership: "explicit",
+    entries: {
+      first: { models: { "first/bare": {} } },
+      second: { models: { "second/bare": {} } },
     },
-  };
+  });
   expectUnchanged(allowMigration, raw);
   expect(validateConfigObjectRaw(raw).ok).toBe(true);
   expect(allowMigration.legacyRules?.[1]?.match?.(raw.agents?.defaults?.models, raw)).toBe(true);
