@@ -1,0 +1,31 @@
+import { vi } from "vitest";
+import type { ComputerUseCapabilityDescriptor } from "../../plugins/computer-use-contract.js";
+import type { Deferred } from "../../shared/deferred.js";
+
+export function computerCapabilities(
+  provider: ComputerUseCapabilityDescriptor["provider"],
+  actions = ["screenshot", "left_click"],
+): ComputerUseCapabilityDescriptor {
+  return {
+    contractVersion: 2,
+    provider,
+    actions,
+    targets: ["screen"],
+    deliveryModes: ["foreground"],
+    observations: ["image"],
+    features: { recording: false, agentCursor: false, multiDisplay: false },
+  };
+}
+
+export function observeSettlement<T>(promise: Promise<T>) {
+  const settled = vi.fn();
+  return { settled, done: promise.then(settled, settled) };
+}
+
+export async function whileHeld<T>(gate: Deferred<void>, check: () => T | Promise<T>) {
+  try {
+    return await check();
+  } finally {
+    gate.resolve();
+  }
+}

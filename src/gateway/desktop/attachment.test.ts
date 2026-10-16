@@ -1,7 +1,8 @@
+import { once } from "node:events";
 import net from "node:net";
 import { PassThrough } from "node:stream";
 import { setImmediate } from "node:timers/promises";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { connectRfbAttachment } from "./attachment.js";
 import { createDesktopSessionRegistry } from "./session-registry.js";
@@ -38,6 +39,10 @@ function createPendingStream(registry: ReturnType<typeof createDesktopSessionReg
   return registry.createStream({ sourceKey: "node:one", ownerEpoch: 1, onStopped: () => {} });
 }
 
+function observe(registry: Registry, close = () => {}) {
+  return registry.attachObserver("node:one", { ownerEpoch: 1, control: false, close });
+}
+
 afterEach(async () => {
   vi.useRealTimers();
   for (const socket of sockets.splice(0)) {
@@ -53,275 +58,246 @@ afterEach(async () => {
   );
 });
 
-describe("RFB attachments", () => {
-  it("connects a loopback TCP attachment", async () => {
-    const accepted = new Promise<void>((resolve) => {
-      const server = net.createServer((socket) => {
-        sockets.push(socket);
-        resolve();
-      });
-      servers.push(server);
-      server.listen(0, "127.0.0.1");
-    });
-    const server = servers[0];
-    if (!server) {
-      throw new Error("expected TCP test server");
-    }
-    await new Promise<void>((resolve) => {
-      server.once("listening", resolve);
-    });
-    const address = server.address();
-    if (!address || typeof address === "string") {
-      throw new Error("expected TCP test server address");
-    }
+it("connects a loopback TCP attachment", async () => {
+  const server = net.createServer((socket) => sockets.push(socket));
+  servers.push(server);
+  const accepted = once(server, "connection").then(() => undefined);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("expected TCP test server address");
+  }
 
-    sockets.push(connectRfbAttachment({ kind: "tcp", host: "127.0.0.1", port: address.port }));
+  sockets.push(connectRfbAttachment({ kind: "tcp", host: "127.0.0.1", port: address.port }));
 
-    await expect(accepted).resolves.toBeUndefined();
-  });
+  await expect(accepted).resolves.toBeUndefined();
+});
 
-  it.each([false, true])("claims only its source's live stream (closed: %s)", async (closed) => {
-    const registry = createDesktopSessionRegistry();
-    await registry.acquire(request());
-    await registry.activate({ sourceKey: "node:two", ownerEpoch: 1 });
-    const stream = new PassThrough();
-    const pending = createPendingStream(registry);
-    expect(pending.reserve()).toBe(true);
-    const invocation = createDeferredCore<{ error?: { message?: string } }>();
-    await pending.connect(
-      { attached: Promise.resolve({ stream }), cancel: () => {} },
-      () => invocation.promise,
-    );
-    const attachment = pending.publish();
-    if (!attachment) {
-      throw new Error("expected stream attachment");
-    }
-    try {
-      expect(registry.claimStream("node:two", attachment)).toBeUndefined();
-      expect(stream.destroyed).toBe(false);
-      expect(registry.hasActivity("node:one", 1)).toBe(true);
+it.each([false, true])("claims only its source's live stream (closed: %s)", async (closed) => {
+  const registry = createDesktopSessionRegistry();
+  await registry.acquire(request());
+  await registry.activate({ sourceKey: "node:two", ownerEpoch: 1 });
+  const stream = new PassThrough();
+  const pending = createPendingStream(registry);
+  expect(pending.reserve()).toBe(true);
+  const invocation = createDeferredCore<{ error?: { message?: string } }>();
+  await pending.connect(
+    { attached: Promise.resolve({ stream }), cancel: () => {} },
+    () => invocation.promise,
+  );
+  const attachment = pending.publish();
+  if (!attachment) {
+    throw new Error("expected stream attachment");
+  }
+  try {
+    expect(registry.claimStream("node:two", attachment)).toBeUndefined();
+    expect(stream.destroyed).toBe(false);
+    expect(registry.hasActivity("node:one", 1)).toBe(true);
 
-      if (closed) {
-        const streamClosed = new Promise<void>((resolve) => {
-          stream.once("close", () => resolve());
-        });
-        stream.destroy();
-        await streamClosed;
-      }
-
-      expect(registry.claimStream("node:one", attachment)).toBe(closed ? undefined : stream);
-      expect(registry.hasActivity("node:one", 1)).toBe(false);
-      expect(registry.claimStream("node:one", attachment)).toBeUndefined();
-    } finally {
+    if (closed) {
+      const streamClosed = once(stream, "close");
       stream.destroy();
-      invocation.resolve({});
-      await pending.stop();
-      await registry.stopAll();
+      await streamClosed;
     }
-  });
 
-  it.each(["acquire", "activate"] as const)("refreshes idle cleanup after %s", async (method) => {
-    vi.useFakeTimers();
-    const teardown = vi.fn(async () => undefined);
-    const registry = createDesktopSessionRegistry({ lingerMs: 25 });
-    const params = request({ teardown });
-    await registry[method](params);
-    await vi.advanceTimersByTimeAsync(20);
-    await registry[method](params);
-    await vi.advanceTimersByTimeAsync(20);
-    expect(teardown).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(5);
-    expect(teardown).toHaveBeenCalled();
+    expect(registry.claimStream("node:one", attachment)).toBe(closed ? undefined : stream);
+    expect(registry.hasActivity("node:one", 1)).toBe(false);
+    expect(registry.claimStream("node:one", attachment)).toBeUndefined();
+  } finally {
+    stream.destroy();
+    invocation.resolve({});
+    await pending.stop();
     await registry.stopAll();
-  });
+  }
+});
 
-  it.each(["stop", "stopAll"] as const)("%s joins teardown already in progress", async (method) => {
+it.each(["acquire", "activate"] as const)("refreshes idle cleanup after %s", async (method) => {
+  vi.useFakeTimers();
+  const teardown = vi.fn(async () => undefined);
+  const registry = createDesktopSessionRegistry({ lingerMs: 25 });
+  const params = request({ teardown });
+  await registry[method](params);
+  await vi.advanceTimersByTimeAsync(20);
+  await registry[method](params);
+  await vi.advanceTimersByTimeAsync(20);
+  expect(teardown).not.toHaveBeenCalled();
+
+  await vi.advanceTimersByTimeAsync(5);
+  expect(teardown).toHaveBeenCalled();
+  await registry.stopAll();
+});
+
+it.each(["stop", "stopAll"] as const)("%s joins teardown already in progress", async (method) => {
+  const registry = createDesktopSessionRegistry();
+  const { entered, release, teardown } = heldCleanup();
+  await registry.activate(request({ teardown }));
+  const completed: string[] = [];
+  let reentrantStop: Promise<void> | undefined;
+  observe(registry, () => {
+    reentrantStop = registry.stop("node:one", 1).then(() => {
+      completed.push("observer");
+    });
+  });
+  const first = registry.stop("node:one", 1);
+  await entered.promise;
+  const second = (method === "stop" ? registry.stop("node:one", 1) : registry.stopAll()).then(
+    () => {
+      completed.push("second");
+    },
+  );
+  try {
+    await setImmediate();
+    expect(completed).toEqual([]);
+    expect(reentrantStop).toBeDefined();
+    expect(createPendingStream(registry).reserve()).toBe(false);
+  } finally {
+    release.resolve();
+    await Promise.all([first, second, reentrantStop]);
+  }
+  expect(completed.toSorted()).toEqual(["observer", "second"]);
+});
+
+it.each([1, 2])("waits for stopped resources before acquiring epoch %s", async (ownerEpoch) => {
+  const registry = createDesktopSessionRegistry();
+  const { entered, release, teardown } = heldCleanup();
+  await registry.acquire(request({ teardown }));
+  const stopping = registry.stop("node:one", 1);
+  await entered.promise;
+  const start = vi.fn(async () => ({ attachment: tcpAttachment }));
+  const acquiring = registry.acquire({ sourceKey: "node:one", ownerEpoch, start });
+  try {
+    await setImmediate();
+    expect(start).not.toHaveBeenCalled();
+  } finally {
+    release.resolve();
+    await Promise.all([stopping, acquiring]);
+    await registry.stopAll();
+  }
+  expect(start).toHaveBeenCalledOnce();
+});
+
+it("bounds pending observer reservations before streams are started", async () => {
+  const registry = createDesktopSessionRegistry();
+  await registry.activate(request());
+  const pending = Array.from({ length: 8 }, () => createPendingStream(registry));
+  expect(pending.every((stream) => stream.reserve())).toBe(true);
+  expect(createPendingStream(registry).reserve()).toBe(false);
+
+  await pending[0]?.stop();
+  expect(createPendingStream(registry).reserve()).toBe(true);
+  await registry.stopAll();
+});
+
+it.each([1, 2])("bounds repeated failed cleanup at epoch %s", async (ownerEpoch) => {
+  const registry = createDesktopSessionRegistry();
+  const failure = new Error("transport still running");
+  const teardown = vi.fn().mockRejectedValue(failure);
+  const dispose = vi.fn(async () => undefined);
+  const start = vi.fn(async () => ({ attachment: tcpAttachment }));
+  const params = request({ start, teardown, dispose });
+  cleanupWarning.mockClear();
+  await registry.acquire(params);
+  try {
+    if (ownerEpoch === 1) {
+      await expect(registry.stop("node:one", 1)).rejects.toBe(failure);
+    }
+    for (let attempt = 1; attempt < 300; attempt++) {
+      await expect(registry.acquire({ ...params, ownerEpoch })).rejects.toBe(failure);
+    }
+    expect(teardown).toHaveBeenCalledOnce();
+    expect(cleanupWarning).toHaveBeenCalledOnce();
+    expect(start).toHaveBeenCalledOnce();
+    expect(dispose).not.toHaveBeenCalled();
+    expect(createPendingStream(registry).reserve()).toBe(false);
+  } finally {
+    teardown.mockClear();
+    teardown.mockResolvedValue(undefined);
+    await registry.stopAll();
+  }
+  // Only the original owner remains to recover, with teardown bracketing initialization.
+  expect(teardown).toHaveBeenCalledTimes(2);
+  expect(dispose).toHaveBeenCalledOnce();
+  await registry.acquire({ ...params, ownerEpoch: 2 });
+  expect(start).toHaveBeenCalledTimes(2);
+  await registry.stopAll();
+});
+
+it.each(["epoch", "source", "all"] as const)(
+  "keeps a draining replacement visible to %s stop",
+  async (scope) => {
     const registry = createDesktopSessionRegistry();
     const { entered, release, teardown } = heldCleanup();
     await registry.activate(request({ teardown }));
-    const completed: string[] = [];
-    let reentrantStop: Promise<void> | undefined;
-    registry.attachObserver("node:one", {
-      ownerEpoch: 1,
-      control: false,
-      close: () => {
-        reentrantStop = registry.stop("node:one", 1).then(() => {
-          completed.push("observer");
-        });
-      },
-    });
-    const first = registry.stop("node:one", 1);
-    await entered.promise;
-    const second = (method === "stop" ? registry.stop("node:one", 1) : registry.stopAll()).then(
-      () => {
-        completed.push("second");
-      },
-    );
-    try {
-      await setImmediate();
-      expect(completed).toEqual([]);
-      expect(reentrantStop).toBeDefined();
-      expect(createPendingStream(registry).reserve()).toBe(false);
-    } finally {
-      release.resolve();
-      await Promise.all([first, second, reentrantStop]);
-    }
-    expect(completed.toSorted()).toEqual(["observer", "second"]);
-  });
-
-  it.each([1, 2])("waits for stopped resources before acquiring epoch %s", async (ownerEpoch) => {
-    const registry = createDesktopSessionRegistry();
-    const { entered, release, teardown } = heldCleanup();
-    await registry.acquire(request({ teardown }));
-    const stopping = registry.stop("node:one", 1);
-    await entered.promise;
     const start = vi.fn(async () => ({ attachment: tcpAttachment }));
-    const acquiring = registry.acquire({ sourceKey: "node:one", ownerEpoch, start });
+    const acquiring = registry.acquire({ sourceKey: "node:one", ownerEpoch: 2, start });
+    const outcome = acquiring.then(
+      () => "ready",
+      () => "stopped",
+    );
+    await entered.promise;
+    const stopping =
+      scope === "all"
+        ? registry.stopAll()
+        : registry.stop("node:one", scope === "epoch" ? 2 : undefined);
+    release.resolve();
     try {
-      await setImmediate();
+      await stopping;
+      expect(await outcome).toBe("stopped");
       expect(start).not.toHaveBeenCalled();
     } finally {
-      release.resolve();
-      await Promise.all([stopping, acquiring]);
       await registry.stopAll();
     }
-    expect(start).toHaveBeenCalledOnce();
+  },
+);
+
+it("joins sibling teardown before reporting stopAll failure", async () => {
+  const registry = createDesktopSessionRegistry();
+  const release = createDeferredCore();
+  const failure = new Error("cleanup failed");
+  const teardown = vi.fn().mockRejectedValue(failure);
+  await registry.activate(request({ teardown }));
+  await registry.activate(request({ sourceKey: "node:two", teardown: () => release.promise }));
+  let settled = false;
+  const stopping = registry.stopAll().finally(() => {
+    settled = true;
   });
-
-  it("bounds pending observer reservations before streams are started", async () => {
-    const registry = createDesktopSessionRegistry();
-    await registry.activate({ sourceKey: "node:one", ownerEpoch: 1 });
-    const pending = Array.from({ length: 8 }, () => createPendingStream(registry));
-    expect(pending.every((stream) => stream.reserve())).toBe(true);
-    expect(createPendingStream(registry).reserve()).toBe(false);
-
-    await pending[0]?.stop();
-    expect(createPendingStream(registry).reserve()).toBe(true);
+  const rejected = expect(stopping).rejects.toBe(failure);
+  try {
+    await setImmediate();
+    expect(settled).toBe(false);
+  } finally {
+    release.resolve();
+    await rejected;
+    teardown.mockResolvedValue(undefined);
     await registry.stopAll();
-  });
+  }
+});
 
-  it.each([1, 2])(
-    "bounds failed cleanup across repeated acquisition at epoch %s",
-    async (ownerEpoch) => {
-      const registry = createDesktopSessionRegistry();
-      const failure = new Error("transport still running");
-      const teardown = vi.fn().mockRejectedValue(failure);
-      const dispose = vi.fn(async () => undefined);
-      const start = vi.fn(async () => ({ attachment: tcpAttachment }));
-      const params = request({ start, teardown, dispose });
-      cleanupWarning.mockClear();
-      await registry.acquire(params);
-      try {
-        if (ownerEpoch === 1) {
-          await expect(registry.stop("node:one", 1)).rejects.toBe(failure);
-        }
-        for (let attempt = 1; attempt < 300; attempt++) {
-          await expect(registry.acquire({ ...params, ownerEpoch })).rejects.toBe(failure);
-        }
-        expect(teardown).toHaveBeenCalledOnce();
-        expect(cleanupWarning).toHaveBeenCalledOnce();
-        expect(start).toHaveBeenCalledOnce();
-        expect(dispose).not.toHaveBeenCalled();
-        expect(createPendingStream(registry).reserve()).toBe(false);
-      } finally {
-        teardown.mockClear();
-        teardown.mockResolvedValue(undefined);
-        await registry.stopAll();
-      }
-      // Only the original owner remains to recover, with teardown bracketing initialization.
-      expect(teardown).toHaveBeenCalledTimes(2);
-      expect(dispose).toHaveBeenCalledOnce();
-      await registry.acquire({ ...params, ownerEpoch: 2 });
-      expect(start).toHaveBeenCalledTimes(2);
-      await registry.stopAll();
-    },
-  );
+it("retains failed resource disposal for a later cleanup retry", async () => {
+  const registry = createDesktopSessionRegistry();
+  const failure = new Error("directory still present");
+  const dispose = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue(undefined);
+  await registry.activate(request({ dispose }));
+  await expect(registry.stop("node:one", 1)).rejects.toBe(failure);
+  await registry.stopAll();
+  expect(dispose).toHaveBeenCalledTimes(2);
+});
 
-  it.each(["epoch", "source", "all"] as const)(
-    "keeps a replacement visible to %s stop while its predecessor drains",
-    async (scope) => {
-      const registry = createDesktopSessionRegistry();
-      const { entered, release, teardown } = heldCleanup();
-      await registry.activate(request({ teardown }));
-      const start = vi.fn(async () => ({ attachment: tcpAttachment }));
-      const acquiring = registry.acquire({ sourceKey: "node:one", ownerEpoch: 2, start });
-      const outcome = acquiring.then(
-        () => "ready",
-        () => "stopped",
-      );
-      await entered.promise;
-      const stopping =
-        scope === "all"
-          ? registry.stopAll()
-          : registry.stop("node:one", scope === "epoch" ? 2 : undefined);
-      release.resolve();
-      try {
-        await stopping;
-        expect(await outcome).toBe("stopped");
-        expect(start).not.toHaveBeenCalled();
-      } finally {
-        await registry.stopAll();
-      }
-    },
-  );
+it("does not linger-stop a reservation when another observer disconnects", async () => {
+  vi.useFakeTimers();
+  const teardown = vi.fn(async () => undefined);
+  const registry = createDesktopSessionRegistry({ lingerMs: 25 });
+  await registry.activate(request({ teardown }));
+  const observer = observe(registry);
+  const pending = createPendingStream(registry);
+  expect(pending.reserve()).toBe(true);
+  expect(observer).toBeDefined();
+  observer?.release();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(teardown).not.toHaveBeenCalled();
 
-  it("joins sibling teardown before reporting stopAll failure", async () => {
-    const registry = createDesktopSessionRegistry();
-    const release = createDeferredCore();
-    const failure = new Error("cleanup failed");
-    const teardown = vi.fn().mockRejectedValue(failure);
-    await registry.activate({ sourceKey: "node:one", ownerEpoch: 1, teardown });
-    await registry.activate({
-      sourceKey: "node:two",
-      ownerEpoch: 1,
-      teardown: () => release.promise,
-    });
-    let settled = false;
-    const stopping = registry.stopAll().finally(() => {
-      settled = true;
-    });
-    const rejected = expect(stopping).rejects.toBe(failure);
-    try {
-      await setImmediate();
-      expect(settled).toBe(false);
-    } finally {
-      release.resolve();
-      await rejected;
-      teardown.mockResolvedValue(undefined);
-      await registry.stopAll();
-    }
-  });
-
-  it("retains failed resource disposal for a later cleanup retry", async () => {
-    const registry = createDesktopSessionRegistry();
-    const failure = new Error("directory still present");
-    const dispose = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue(undefined);
-    await registry.activate({ sourceKey: "node:one", ownerEpoch: 1, dispose });
-    await expect(registry.stop("node:one", 1)).rejects.toBe(failure);
-    await registry.stopAll();
-    expect(dispose).toHaveBeenCalledTimes(2);
-  });
-
-  it("does not linger-stop a reservation when another observer disconnects", async () => {
-    vi.useFakeTimers();
-    const teardown = vi.fn(async () => undefined);
-    const registry = createDesktopSessionRegistry({ lingerMs: 25 });
-    await registry.activate({ sourceKey: "node:one", ownerEpoch: 1, teardown });
-    const observer = registry.attachObserver("node:one", {
-      ownerEpoch: 1,
-      control: false,
-      close: () => {},
-    });
-    const pending = createPendingStream(registry);
-    expect(pending.reserve()).toBe(true);
-    expect(observer).toBeDefined();
-    observer?.release();
-    await vi.advanceTimersByTimeAsync(100);
-    expect(teardown).not.toHaveBeenCalled();
-
-    await pending.stop();
-    await vi.advanceTimersByTimeAsync(25);
-    expect(teardown).toHaveBeenCalled();
-  });
+  await pending.stop();
+  await vi.advanceTimersByTimeAsync(25);
+  expect(teardown).toHaveBeenCalled();
 });

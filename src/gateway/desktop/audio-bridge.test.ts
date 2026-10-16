@@ -2,13 +2,12 @@ import { EventEmitter } from "node:events";
 import type { IncomingMessage } from "node:http";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createDeferred } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
-import type { ProcessSupervisor, SpawnInput } from "../../process/supervisor/types.js";
 import { markGatewayIngressTransport } from "../ingress-attribution.js";
 import { createRemoteControlUiIngressTestContext } from "../remote-control-ui.test-support.js";
 import type { RemoteControlUiIngressContext } from "../server/client-identity-types.js";
-import { createManagedLinuxAudio, type DesktopAudioSource } from "./managed-linux-audio.js";
+import { createAudioFixture } from "./audio.test-support.js";
+import type { DesktopAudioSource } from "./managed-linux-audio.js";
 
 const peers = vi.hoisted(() => ({ next: undefined as unknown }));
 vi.mock("../../../packages/gateway-client/src/websocket.js", () => ({
@@ -103,7 +102,17 @@ function fixture(
     }
     return capture;
   };
-  return { observation, peer, start, captures, firstCapture, attach };
+  const activate = () => {
+    attach();
+    observation.activate();
+  };
+  const capture = async () => {
+    activate();
+    peer.command("start");
+    await flush();
+    return firstCapture();
+  };
+  return { observation, peer, start, firstCapture, attach, activate, capture };
 }
 
 describe("screen-owned desktop audio", () => {
@@ -127,38 +136,35 @@ describe("screen-owned desktop audio", () => {
     expect(f.firstCapture().stop).toHaveBeenCalledTimes(1);
   });
 
-  it.each([false, true])(
-    "serializes capture intent (pending authentication: %s)",
-    async (pending) => {
-      const f = fixture();
-      f.attach();
-      if (pending) {
-        for (let n = 0; n < 100; n++) {
-          f.peer.command("start");
-          f.peer.command("stop");
-        }
+  it.each([false, true])("serializes capture intent (pending auth: %s)", async (pending) => {
+    const f = fixture();
+    f.attach();
+    if (pending) {
+      for (let n = 0; n < 100; n++) {
         f.peer.command("start");
-      }
-      f.observation.activate();
-      await flush();
-      if (!pending) {
-        expect(f.start).not.toHaveBeenCalled();
-        f.peer.command("start");
-        await flush();
+        f.peer.command("stop");
       }
       f.peer.command("start");
-      await flush();
-      expect(f.start).toHaveBeenCalledTimes(1);
-      f.peer.command("stop");
-      const before = f.peer.sent.length;
-      f.firstCapture().stream.write(Buffer.alloc(4, 10));
-      expect(f.peer.sent).toHaveLength(before);
+    }
+    f.observation.activate();
+    await flush();
+    if (!pending) {
+      expect(f.start).not.toHaveBeenCalled();
       f.peer.command("start");
       await flush();
-      expect(f.firstCapture().stop).toHaveBeenCalledTimes(1);
-      expect(f.start).toHaveBeenCalledTimes(2);
-    },
-  );
+    }
+    f.peer.command("start");
+    await flush();
+    expect(f.start).toHaveBeenCalledTimes(1);
+    f.peer.command("stop");
+    const before = f.peer.sent.length;
+    f.firstCapture().stream.write(Buffer.alloc(4, 10));
+    expect(f.peer.sent).toHaveLength(before);
+    f.peer.command("start");
+    await flush();
+    expect(f.firstCapture().stop).toHaveBeenCalledTimes(1);
+    expect(f.start).toHaveBeenCalledTimes(2);
+  });
 
   it("rejects replay and retires abandoned screen grants", async () => {
     const f = fixture();
@@ -177,11 +183,7 @@ describe("screen-owned desktop audio", () => {
     async (event) => {
       let current = true;
       const f = fixture({ isCurrent: () => current });
-      f.attach();
-      f.observation.activate();
-      f.peer.command("start");
-      await flush();
-      const capture = f.firstCapture();
+      const capture = await f.capture();
       if (event === "recorder close") {
         capture.stream.destroy();
         capture.stream.emit("close");
@@ -215,95 +217,50 @@ describe("screen-owned desktop audio", () => {
     [true, "requester"],
     [false, "requester"],
     [false, "ingress"],
-  ] as const)(
-    "carries live authority into pending capture admission (%s, %s)",
-    async (allowed, authority) => {
-      const admission = createDeferred();
-      const attempted = createDeferred();
-      const settled = createDeferred();
-      let current = true;
-      let admitted = false;
-      const nativeGuard = vi.fn();
-      const cleanup = vi.fn(async () => undefined);
-      const supervisor: ProcessSupervisor = {
-        acquireScopeCleanup: () => cleanup,
-        cancel() {},
-        cancelScope() {},
-        async spawn(input: SpawnInput) {
-          if (input.mode !== "child") {
-            throw new Error("expected native capture");
-          }
-          if (input.argv[0] === "parec") {
-            attempted.resolve();
-            await admission.promise;
-            try {
-              nativeGuard(() => input.assertCurrent?.());
-              input.assertCurrent?.();
-              admitted = true;
-              input.onStdoutRaw?.(Buffer.alloc(4));
-            } finally {
-              settled.resolve();
-            }
-          } else {
-            input.onStderr?.("Daemon startup complete.\n");
-          }
-          return {
-            runId: input.argv[0]!,
-            startedAtMs: 0,
-            activity: { resultSettled: false, lastOutputAtMs: 0 },
-            wait: () => new Promise(() => {}),
-            cancel() {},
-          };
-        },
-      };
-      const owner = createManagedLinuxAudio({
-        supervisor,
-        tempDir: tempDirs.make("desktop-viewer-admission-"),
-        env: {},
-        assertCurrent() {},
-        runtime: { detectBinary: async () => true },
-      });
-      const audio = await owner.ready;
-      const requesterAbort = new AbortController();
-      const ingress =
-        authority === "ingress"
-          ? createRemoteControlUiIngressTestContext({
-              assertCurrent() {
-                if (!current) {
-                  throw new Error("ingress revoked");
-                }
-              },
-            })
-          : undefined;
-      const f = fixture(
-        { isCurrent: () => authority === "ingress" || current, signal: requesterAbort.signal },
-        audio.source,
-        ingress,
-      );
-      f.attach();
-      f.observation.activate();
-      f.peer.command("start");
-      await attempted.promise;
-      current = allowed;
-      admission.resolve();
-      await settled.promise;
-      await flush();
-      expect(admitted).toBe(allowed);
-      expect(requesterAbort.signal.aborted).toBe(false);
-      expect(nativeGuard).toHaveBeenCalledOnce();
-      expect(f.peer.sent.filter((frame) => typeof frame === "string")).toEqual(
-        allowed ? ['{"state":"started"}'] : [],
-      );
-      f.observation.close();
-      await owner.stop();
-      expect(cleanup).toHaveBeenCalledTimes(2);
-    },
-  );
+  ] as const)("revalidates pending capture authority (%s, %s)", async (allowed, authority) => {
+    let current = true;
+    const native = createAudioFixture(tempDirs.make("desktop-viewer-admission-"), {
+      deferCapture: true,
+      startupTimeoutMs: 5_000,
+    });
+    const audio = await native.owner.ready;
+    const requesterAbort = new AbortController();
+    const ingress =
+      authority === "ingress"
+        ? createRemoteControlUiIngressTestContext({
+            assertCurrent() {
+              if (!current) {
+                throw new Error("ingress revoked");
+              }
+            },
+          })
+        : undefined;
+    const f = fixture(
+      { isCurrent: () => authority === "ingress" || current, signal: requesterAbort.signal },
+      audio.source,
+      ingress,
+    );
+    f.activate();
+    f.peer.command("start");
+    await native.captureSpawned.promise;
+    current = allowed;
+    native.captureAdmission.resolve();
+    await native.captureSettled.promise;
+    await flush();
+    expect(native.captureAdmitted).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    expect(requesterAbort.signal.aborted).toBe(false);
+    expect(native.nativeGuard).toHaveBeenCalledOnce();
+    expect(f.peer.sent.filter((frame) => typeof frame === "string")).toEqual(
+      allowed ? ['{"state":"started"}'] : [],
+    );
+    f.observation.close();
+    await native.owner.stop();
+    expect(native.scopeCleaned).toHaveBeenCalledTimes(2);
+  });
 
   it("rejects binary or unknown commands without starting capture", async () => {
     const f = fixture();
-    f.attach();
-    f.observation.activate();
+    f.activate();
     f.peer.emit("message", Buffer.alloc(4), true);
     await flush();
     expect(f.peer.closed[0]?.[0]).toBe(1008);
