@@ -401,43 +401,49 @@ async function buildOpenAICodexLiveProviderConfig(params: {
   signal?: AbortSignal;
 }): Promise<OpenAILiveProviderCatalog> {
   const catalogRuntime = await import("openclaw/plugin-sdk/provider-catalog-live-runtime");
-  const { getCachedLiveProviderModelRows, LiveModelCatalogHttpError } = catalogRuntime;
+  const { getCachedLiveCatalogValue } = await import("openclaw/plugin-sdk/provider-catalog-shared");
+  const { fetchLiveProviderModelRows, LiveModelCatalogHttpError } = catalogRuntime;
   const endpoint = await resolveOpenAICodexModelsEndpoint(params.catalogContext);
   try {
-    const rows = await getCachedLiveProviderModelRows({
-      providerId: PROVIDER_ID,
-      endpoint,
-      discoveryApiKey: params.discoveryApiKey,
-      fetchGuard: params.fetchGuard,
+    return await getCachedLiveCatalogValue({
       signal: params.signal,
       ttlMs: OPENAI_CODEX_MODELS_CACHE_TTL_MS,
-      auditContext: "openai-model-discovery",
-      readRows: readCodexModelRows,
-      buildRequestHeaders: ({ discoveryApiKey }) => ({
-        Accept: "application/json",
-        ...(discoveryApiKey ? { Authorization: `Bearer ${discoveryApiKey}` } : {}),
-        ...(params.accountId ? { "ChatGPT-Account-ID": params.accountId } : {}),
-      }),
-      cacheKeyParts: [
+      keyParts: [
         PROVIDER_ID,
-        "codex-model-rows",
+        "codex-catalog",
         endpoint,
         params.discoveryApiKey,
         params.accountId ?? "",
       ],
-    });
-    const models = rows
-      .map((row) => buildOpenAICodexModelFromLiveRow(row, catalogRuntime))
-      .filter((model): model is ModelDefinitionConfig => Boolean(model));
-    return {
-      provider: {
-        baseUrl: OPENAI_CODEX_RESPONSES_BASE_URL,
-        api: "openai-chatgpt-responses",
-        auth: "oauth",
-        models,
+      load: async (signal): Promise<OpenAILiveProviderCatalog> => {
+        const rows = await fetchLiveProviderModelRows({
+          providerId: PROVIDER_ID,
+          endpoint,
+          discoveryApiKey: params.discoveryApiKey,
+          fetchGuard: params.fetchGuard,
+          signal,
+          auditContext: "openai-model-discovery",
+          readRows: readCodexModelRows,
+          buildRequestHeaders: ({ discoveryApiKey }) => ({
+            Accept: "application/json",
+            ...(discoveryApiKey ? { Authorization: `Bearer ${discoveryApiKey}` } : {}),
+            ...(params.accountId ? { "ChatGPT-Account-ID": params.accountId } : {}),
+          }),
+        });
+        // The backend also sends prompt templates; retain only account catalog facts.
+        return {
+          provider: {
+            baseUrl: OPENAI_CODEX_RESPONSES_BASE_URL,
+            api: "openai-chatgpt-responses",
+            auth: "oauth",
+            models: rows
+              .map((row) => buildOpenAICodexModelFromLiveRow(row, catalogRuntime))
+              .filter((model): model is ModelDefinitionConfig => Boolean(model)),
+          },
+          outcome: buildOpenAICodexReadyOutcome(rows),
+        };
       },
-      outcome: buildOpenAICodexReadyOutcome(rows),
-    };
+    });
   } catch (error) {
     if (
       error instanceof LiveModelCatalogHttpError &&

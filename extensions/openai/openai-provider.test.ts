@@ -1,3 +1,4 @@
+import { queryObjects } from "node:v8";
 import type { StreamFn } from "openclaw/plugin-sdk/agent-core";
 import type { Context, Model, SimpleStreamOptions } from "openclaw/plugin-sdk/llm";
 import {
@@ -714,6 +715,66 @@ describe("buildOpenAIProvider", () => {
         supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
       },
     });
+  });
+
+  it("releases raw Codex instructions while reusing account catalog facts", async () => {
+    const body = JSON.stringify({
+      models: [
+        {
+          slug: "catalog-retention-fixture",
+          display_name: "Catalog retention fixture",
+          visibility: "list",
+          base_instructions: "Synthetic instructions".repeat(1024),
+          model_messages: { instructions_template: "Synthetic template".repeat(1024) },
+        },
+      ],
+    });
+    const rows: WeakRef<object>[] = [];
+    const parse = JSON.parse;
+    const parseSpy = vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+      const parsed: unknown = parse(text, reviver);
+      if (
+        text === body &&
+        parsed &&
+        typeof parsed === "object" &&
+        "models" in parsed &&
+        Array.isArray(parsed.models)
+      ) {
+        rows.push(new WeakRef(parsed.models[0]));
+      }
+      return parsed;
+    });
+    const fetchGuard = vi.fn<LiveModelCatalogFetchGuard>(async () => ({
+      response: new Response(body),
+      finalUrl: "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0",
+      release: async () => undefined,
+    }));
+    try {
+      for (const accountId of ["account-one", "account-one", "account-two"]) {
+        const provider = await buildOpenAICodexLiveProviderConfig({
+          discoveryApiKey: "synthetic-retention-token",
+          accountId,
+          fetchGuard,
+        });
+        expect(provider.models).toEqual([
+          expect.objectContaining({
+            id: "catalog-retention-fixture",
+            name: "Catalog retention fixture",
+            api: "openai-chatgpt-responses",
+          }),
+        ]);
+      }
+      expect(fetchGuard).toHaveBeenCalledTimes(2);
+      expect(rows).toHaveLength(2);
+    } finally {
+      parseSpy.mockRestore();
+    }
+    // Cross the job boundary before collection; the cached projection stays available.
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    queryObjects(WeakRef);
+    expect(rows.map((row) => row.deref() !== undefined)).toEqual([false, false]);
   });
 
   it("keeps an explicit empty Codex reasoning catalog authoritative", async () => {
