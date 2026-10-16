@@ -19,6 +19,11 @@ import { createPluginRuntime } from "./runtime/index.js";
 import type { PluginRuntime } from "./runtime/types.js";
 
 type RunParams = Parameters<PluginRuntime["agent"]["runEmbeddedAgent"]>[0];
+const runDefaults = { workspaceDir: "/tmp", prompt: "continue", timeoutMs: 1, runId: "run-1" };
+const reject = (pending: Promise<unknown>, error: string) => expect(pending).rejects.toThrow(error);
+const match = (pending: Promise<unknown>, expected: unknown) =>
+  expect(pending).resolves.toMatchObject(expected);
+const admitted = (pending: Promise<unknown>) => expect(pending).resolves.toBe("admitted");
 
 function pluginFixture(runtime: PluginRuntime, id: string, config: OpenClawConfig = {}) {
   const { builder: registry, createApi } = createOwnershipRegistry(runtime, config);
@@ -41,7 +46,7 @@ describe("plugin registry runtime session ownership", () => {
       const runtime = createPluginRuntime();
       const entered = createDeferredCore();
       const resume = createDeferredCore();
-      const original = { sessionId: "managed", updatedAt: 1, label: "original" };
+      const original = sessionEntry("managed", { label: "original" });
       const delivery = normalizeSessionDeliveryState({
         context: { channel: "slack", to: "C123" },
       });
@@ -69,10 +74,10 @@ describe("plugin registry runtime session ownership", () => {
         }
         return stored;
       };
+      const applyRoute = () => (stored = { ...stored, delivery });
       runtime.channel.session.updateLastRoute = async () => {
         await waitForAdmission();
-        stored = { ...stored, delivery };
-        return stored;
+        return applyRoute();
       };
       runtime.channel.session.updateLastRouteWithAuthority = async ({ authority }) => {
         await waitForAdmission();
@@ -81,8 +86,7 @@ describe("plugin registry runtime session ownership", () => {
         } else {
           authority.source();
         }
-        stored = { ...stored, delivery };
-        return stored;
+        return applyRoute();
       };
       const { registry, record, api } = pluginFixture(runtime, "managed-writer");
       const writing =
@@ -110,11 +114,12 @@ describe("plugin registry runtime session ownership", () => {
     async (selection) => {
       const runtime = createPluginRuntime();
       const pending = createDeferredCore<SessionEntry>();
-      const entry = { sessionId: "managed", updatedAt: 1 };
+      const entry = sessionEntry("managed");
       runtime.agent.session.getSessionEntryAsync = () => pending.promise;
-      runtime.agent.session.getSessionEntryByIdAsync = async () => {
-        return { sessionKey: "agent:main:managed", entry: await pending.promise };
-      };
+      runtime.agent.session.getSessionEntryByIdAsync = async () => ({
+        sessionKey: "agent:main:managed",
+        entry: await pending.promise,
+      });
       const { registry, record, api } = pluginFixture(runtime, "managed-reader");
       const reading =
         selection === "key"
@@ -135,9 +140,7 @@ describe("plugin registry runtime session ownership", () => {
       const runtime = createPluginRuntime();
       const entered = createDeferredCore();
       const resume = createDeferredCore();
-      const entries = [
-        { sessionKey: "agent:main:shared", entry: { sessionId: "shared", updatedAt: 1 } },
-      ];
+      const entries = [{ sessionKey: "agent:main:shared", entry: sessionEntry("shared") }];
       const assertSourceCurrent = vi.fn();
       const scopes: Array<string | undefined> = [];
       const waitAt = async (boundary: "factory" | "read") => {
@@ -191,15 +194,13 @@ describe("plugin registry runtime session ownership", () => {
 
   it("resolves persisted runtime requests at the plugin execution boundary", async () => {
     const sessionKey = "agent:worker:voice";
-    const entry: SessionEntry = {
-      sessionId: "voice-session",
-      updatedAt: 1,
+    const entry = sessionEntry("voice-session", {
       pluginOwnerId: "voice-call",
       agentHarnessId: "codex",
       modelSelectionLocked: true,
       modelProvider: "anthropic",
       model: "previous-model",
-    };
+    });
     const cfg: OpenClawConfig = {
       agents: {
         defaults: { model: { primary: "anthropic/default-model" } },
@@ -219,29 +220,14 @@ describe("plugin registry runtime session ownership", () => {
     const createApi = createApis(runtime, cfg);
     const api = createApi("voice-call");
     const otherApi = createApi("other-plugin");
+    const identity = { sessionId: entry.sessionId, sessionKey, agentId: "worker" };
     const runParams = {
-      sessionId: entry.sessionId,
-      sessionKey,
-      agentId: "worker",
-      workspaceDir: "/tmp",
-      prompt: "continue",
-      timeoutMs: 1,
+      ...runDefaults,
+      ...identity,
       runId: "voice-run",
-      sessionTarget: {
-        sessionId: entry.sessionId,
-        sessionKey,
-        agentId: "worker",
-        storePath: "/tmp/sessions.json",
-      },
+      sessionTarget: { ...identity, storePath: "/tmp/sessions.json" },
     } satisfies RunParams;
-    const cases: Array<
-      [
-        name: string,
-        storedRuntime: string | undefined,
-        request: Partial<RunParams>,
-        expected?: string,
-      ]
-    > = [
+    const cases: [string, string | undefined, Partial<RunParams>, string?][] = [
       ["stored request", "openclaw", {}, "openclaw"],
       ["agent default provider", "codex", {}, "codex"],
       [
@@ -317,17 +303,7 @@ describe("plugin registry runtime session ownership", () => {
     session.listSessionEntriesAsync = vi.fn(async () =>
       Object.entries(entries).map(([sessionKey, entry]) => ({ sessionKey, entry })),
     );
-    session.patchSessionEntry = vi.fn(async (params) => {
-      const entry = entries[params.sessionKey];
-      if (!entry) {
-        return null;
-      }
-      const patch = await params.update(structuredClone(entry), {
-        existingEntry: structuredClone(entry),
-      });
-      return patch ? { ...entry, ...patch } : entry;
-    });
-    session.prepareSessionEntryPatch = vi.fn(async (params) => {
+    const preparePatch: typeof session.prepareSessionEntryPatch = async (params) => {
       const existingEntry = entries[params.sessionKey];
       const entry = existingEntry ?? params.fallbackEntry;
       if (!entry) {
@@ -337,7 +313,11 @@ describe("plugin registry runtime session ownership", () => {
         existingEntry: existingEntry ? structuredClone(existingEntry) : undefined,
       });
       return patch ? { ...entry, ...patch } : entry;
-    });
+    };
+    session.prepareSessionEntryPatch = vi.fn(preparePatch);
+    session.patchSessionEntry = vi.fn((params) =>
+      preparePatch({ ...params, prepare: params.update, fallbackEntry: undefined }),
+    );
     session.upsertSessionEntry = vi.fn(async () => {});
     session.updateSessionStoreEntry = vi.fn(async (params) => entries[params.sessionKey] ?? null);
     let admissionScope = getPluginRuntimeGatewayRequestScope();
@@ -370,25 +350,15 @@ describe("plugin registry runtime session ownership", () => {
         delegatedExecutionPluginIds: ["voice-call"],
       }),
     );
-    const runParams = {
-      sessionId: reserved.sessionId,
-      sessionKey: key.reserved,
-      workspaceDir: "/tmp",
-      prompt: "continue",
-      timeoutMs: 1,
-      runId: "run-1",
-    } satisfies RunParams;
+    const reservedIdentity = { sessionId: reserved.sessionId, sessionKey: key.reserved };
+    const runParams = { ...runDefaults, ...reservedIdentity } satisfies RunParams;
+    const sessionStore = { agentId: "main", storePath: "/tmp/sessions.json" };
     const delegated = {
       ...runParams,
       agentId: "main",
       ...lock,
       agentHarnessRuntimeOverride: "codex",
-      sessionTarget: {
-        agentId: "main",
-        sessionId: reserved.sessionId,
-        sessionKey: key.reserved,
-        storePath: "/tmp/sessions.json",
-      },
+      sessionTarget: { ...sessionStore, ...reservedIdentity },
     };
     const run = (api: typeof owner, params: Partial<RunParams> = {}) =>
       api.runtime.agent.runEmbeddedAgent({ ...runParams, ...params });
@@ -399,7 +369,7 @@ describe("plugin registry runtime session ownership", () => {
     ) => api.runtime.agent.session.patchSessionEntry({ sessionKey, update: () => value });
     const ok = (pending: Promise<unknown>) => expect(pending).resolves.toEqual({ ok: true });
     const rejectedByOwner = (pending: Promise<unknown>) =>
-      expect(pending).rejects.toThrow('owned by plugin "codex-owner"');
+      reject(pending, 'owned by plugin "codex-owner"');
     const gatewayAgent = (api: typeof owner, identity: Record<string, string>) =>
       api.runtime.gateway.request("agent", { ...identity, message: "continue" });
     const gatewayPatch = (sessionKey: string, sessionId: string) =>
@@ -409,29 +379,28 @@ describe("plugin registry runtime session ownership", () => {
         expectedSessionId: sessionId,
       });
     const admission = { storePath: "/tmp/sessions.json", sessionKey: key.reserved };
-    await expect(patch(owner, key.reserved)).resolves.toMatchObject(reserved);
+    await match(patch(owner, key.reserved), reserved);
     await ok(run(owner));
     await ok(gatewayAgent(owner, { sessionKey: key.reserved }));
 
     let delegatedCallbackScope = getPluginRuntimeGatewayRequestScope();
-    await expect(
+    await admitted(
       voice.runtime.agent.session.runWithWorkAdmission(admission, async () => {
         delegatedCallbackScope = getPluginRuntimeGatewayRequestScope();
         return "admitted";
       }),
-    ).resolves.toBe("admitted");
+    );
     expect(admissionScope).toMatchObject({ pluginId: "codex-owner" });
     expect(delegatedCallbackScope).toMatchObject({ pluginId: "voice-call" });
     await ok(run(voice, delegated));
     expect(embeddedRunScope).toMatchObject({ pluginId: "codex-owner" });
+    const exactHarness = "only with its exact persisted identity and harness";
     for (const invalid of [
       { agentHarnessRuntimeOverride: "openclaw" },
       { agentHarnessId: undefined },
       { agentHarnessRuntimeOverride: undefined },
     ]) {
-      await expect(run(voice, { ...delegated, ...invalid })).rejects.toThrow(
-        "only with its exact persisted identity and harness",
-      );
+      await reject(run(voice, { ...delegated, ...invalid }), exactHarness);
     }
     await rejectedByOwner(patch(voice, key.reserved, { label: "must stay owner-only" }));
     await rejectedByOwner(patch(other, key.reserved));
@@ -449,20 +418,18 @@ describe("plugin registry runtime session ownership", () => {
       await rejectedByOwner(run(other, params));
     }
     await ok(run(other, { sessionId: undefined, sessionKey: undefined, sessionFile: key.noId }));
-    await expect(
-      run(other, {
-        agentId: "main",
-        sessionId: ordinary.sessionId,
-        sessionKey: key.ordinary,
-        sessionFile: reserved.sessionFile,
-        sessionTarget: {
-          agentId: "main",
-          sessionId: ordinary.sessionId,
-          sessionKey: key.ordinary,
-          storePath: "/tmp/unrelated-sessions.json",
-        },
-      }),
-    ).rejects.toThrow("only with its exact session target identity");
+    const ordinaryIdentity = { sessionId: ordinary.sessionId, sessionKey: key.ordinary };
+    const conflictingTarget = {
+      agentId: "main",
+      ...ordinaryIdentity,
+      sessionFile: reserved.sessionFile,
+      sessionTarget: {
+        ...sessionStore,
+        ...ordinaryIdentity,
+        storePath: "/tmp/unrelated-sessions.json",
+      },
+    };
+    await reject(run(other, conflictingTarget), "only with its exact session target identity");
     await rejectedByOwner(
       other.runtime.subagent.run({ sessionKey: key.reserved, message: "continue" }),
     );
@@ -484,59 +451,34 @@ describe("plugin registry runtime session ownership", () => {
     await rejectedByOwner(run(other, { sessionId: locked.sessionId, sessionKey: key.locked }));
     await rejectedByOwner(gatewayAgent(other, { sessionKey: key.locked }));
 
-    await expect(patch(other, key.plugin, { label: "same plugin owner" })).resolves.toMatchObject({
-      ...plugin,
-      label: "same plugin owner",
-    });
+    const pluginLabel = { label: "same plugin owner" };
+    await match(patch(other, key.plugin, pluginLabel), { ...plugin, ...pluginLabel });
     const pluginRun = { sessionId: plugin.sessionId, sessionKey: key.plugin };
     await ok(run(other, pluginRun));
-    await expect(run(owner, pluginRun)).rejects.toThrow('owned by plugin "other-plugin"');
-    await expect(gatewayAgent(owner, { sessionKey: key.plugin })).rejects.toThrow(
-      'owned by plugin "other-plugin"',
-    );
+    await reject(run(owner, pluginRun), 'owned by plugin "other-plugin"');
+    await reject(gatewayAgent(owner, { sessionKey: key.plugin }), 'owned by plugin "other-plugin"');
+    const mixedOwners = "mixes plugin and reserved harness ownership";
     for (const api of [owner, other]) {
-      await expect(patch(api, key.mixed, { label: "must not mutate" })).rejects.toThrow(
-        "mixes plugin and reserved harness ownership",
-      );
+      await reject(patch(api, key.mixed, { label: "must not mutate" }), mixedOwners);
     }
     const ordinaryLabel = { label: "still ordinary" };
-    await expect(patch(other, key.legacy, ordinaryLabel)).resolves.toMatchObject({
-      ...legacy,
-      ...ordinaryLabel,
-    });
-    await expect(patch(other, key.legacy, lock)).rejects.toThrow(
-      "does not match its reserved session key",
-    );
+    await match(patch(other, key.legacy, ordinaryLabel), { ...legacy, ...ordinaryLabel });
+    const wrongReservedKey = (pending: Promise<unknown>) =>
+      reject(pending, "does not match its reserved session key");
+    await wrongReservedKey(patch(other, key.legacy, lock));
     const otherSession = other.runtime.agent.session;
-    await rejectedByOwner(
-      otherSession.upsertSessionEntry({
-        sessionKey: key.locked,
-        entry: { ...plugin, sessionId: locked.sessionId },
-      }),
-    );
-    await expect(
-      otherSession.upsertSessionEntry({
-        sessionKey: key.legacy,
-        entry: { ...legacy, ...ordinaryLabel },
-      }),
-    ).resolves.toBeUndefined();
-    await expect(
-      otherSession.upsertSessionEntry({
-        sessionKey: key.legacy,
-        entry: { ...legacy, ...lock },
-      }),
-    ).rejects.toThrow("does not match its reserved session key");
+    const upsert = (sessionKey: string, entry: SessionEntry) =>
+      otherSession.upsertSessionEntry({ sessionKey, entry });
+    await rejectedByOwner(upsert(key.locked, { ...plugin, sessionId: locked.sessionId }));
+    await expect(upsert(key.legacy, { ...legacy, ...ordinaryLabel })).resolves.toBeUndefined();
+    await wrongReservedKey(upsert(key.legacy, { ...legacy, ...lock }));
     const legacyAdmission = { ...admission, sessionKey: key.legacy };
-    await expect(
-      otherSession.runWithWorkAdmission(legacyAdmission, async () => "admitted"),
-    ).resolves.toBe("admitted");
+    await admitted(otherSession.runWithWorkAdmission(legacyAdmission, async () => "admitted"));
     const ownershipChangedRun = vi.fn(async () => "must-not-run");
     vi.mocked(session.getSessionEntryAsync)
       .mockImplementationOnce(async () => legacy)
       .mockImplementationOnce(async () => reserved);
-    await expect(
-      otherSession.runWithWorkAdmission(legacyAdmission, ownershipChangedRun),
-    ).rejects.toThrow("does not match its reserved session key");
+    await wrongReservedKey(otherSession.runWithWorkAdmission(legacyAdmission, ownershipChangedRun));
     expect(ownershipChangedRun).not.toHaveBeenCalled();
     await expect(
       otherSession.updateSessionStoreEntry({
@@ -549,7 +491,7 @@ describe("plugin registry runtime session ownership", () => {
       other.runtime.subagent.deleteSession({ sessionKey: key.legacy }),
     ).resolves.toBeUndefined();
     await ok(gatewayPatch(key.legacy, legacy.sessionId));
-    await ok(run(other, { sessionId: ordinary.sessionId, sessionKey: key.ordinary }));
+    await ok(run(other, ordinaryIdentity));
     await ok(other.runtime.gateway.request("voicecall.start", { to: "+15550001234" }));
   });
 });

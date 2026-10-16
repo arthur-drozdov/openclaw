@@ -19,6 +19,7 @@ import {
   runPluginRegisterSyncInRegistry,
 } from "./loader-module-runtime.js";
 import { getPluginInstance } from "./plugin-instance-scope.js";
+import { captureThrownError } from "./public-surface.test-support.js";
 import { PluginRegistryInspectionResources } from "./registry-inspection-resources.js";
 import {
   markPluginRegistryActive,
@@ -29,8 +30,11 @@ import {
   createOwnershipHarness as createHarness,
   createOwnershipRecord as createRecord,
 } from "./registry-ownership.test-support.js";
-import { createRuntimeTestRegistry } from "./registry-runtime.test-helpers.js";
-import { createEmptyPluginRegistry, createPluginRegistry } from "./registry.js";
+import {
+  createRuntimeTestRegistry,
+  createTestPluginRegistry,
+} from "./registry-runtime.test-helpers.js";
+import { createEmptyPluginRegistry } from "./registry.js";
 import { disposePluginRegistryInstances, withPluginRegistrationContext } from "./runtime.js";
 import {
   getPluginRuntimeGatewayRequestScope,
@@ -49,10 +53,15 @@ function registered(
   id: string,
   overrides: Parameters<typeof createRecord>[1] = {},
   runtime = createPluginRuntime(),
+  published = true,
 ) {
-  const builder = createRuntimeTestRegistry(runtime);
+  const builder = published
+    ? createRuntimeTestRegistry(runtime)
+    : createTestPluginRegistry(runtime);
   const record = createRecord(id, overrides);
-  return { builder, record, api: builder.createApi(record, { config: {} }) };
+  const api = builder.createApi(record, { config: {} });
+  const owner = expectDefined(getPluginInstance(record), "registration instance");
+  return { builder, record, api, owner };
 }
 
 function scopeRecorder() {
@@ -105,18 +114,11 @@ describe("plugin registration runtime admission", () => {
     const list = vi.fn(async () => ({ nodes: [] }));
     const runtime = createPluginRuntime();
     runtime.nodes.list = list;
-    const builder = createPluginRegistry({
-      runtime,
-      activateGlobalSideEffects: false,
-      logger: { info() {}, warn() {}, error() {} },
-    });
-    const record = createRecord("register-runtime", { origin });
-    const api = builder.createApi(record, { config: {} });
-    const owner = expectDefined(getPluginInstance(record), "registration instance");
+    const registration = registered("register-runtime", { origin }, runtime, false);
     onTestFinished(async () => {
-      await owner.dispose();
+      await registration.owner.dispose();
     });
-    return { builder, record, api, owner, list };
+    return { ...registration, list };
   }
 
   it("rejects a retained ingress purge after runtime retirement without changing rows", async () => {
@@ -274,8 +276,7 @@ describe("plugin registry runtime config scope", () => {
     source.transcribeAudioFile = async () => ({
       text: getPluginRuntimeGatewayRequestScope()?.pluginRegistry?.coreGatewayMethodNames[0],
     });
-    const { builder, record, api } = registered("stable-media", {}, runtime);
-    const instance = expectDefined(getPluginInstance(record), "media instance");
+    const { builder, record, api, owner } = registered("stable-media", {}, runtime);
     builder.registry.coreGatewayMethodNames.push("original");
     markPluginRegistryActive(builder.registry);
     const facade = api.runtime.mediaUnderstanding;
@@ -322,7 +323,7 @@ describe("plugin registry runtime config scope", () => {
       );
     } finally {
       intercept.mockRestore();
-      await instance.dispose();
+      await owner.dispose();
       markPluginRegistryRetired(successor);
     }
   });
@@ -332,19 +333,17 @@ describe("plugin registry runtime config scope", () => {
       readonly fixtureLabel = "RetiredRegistry";
     }
     const runtime = createPluginRuntime();
-    const { builder, record, api } = registered("hosted-media", {}, runtime);
-    const instance = expectDefined(getPluginInstance(record), "media instance");
+    const { builder, api, owner } = registered("hosted-media", {}, runtime);
     api.registerHostedMediaResolver((url) =>
       url === "hosted:fixture" ? "/synthetic/resolved.txt" : undefined,
     );
-    builder.registry.plugins.push(record);
     const media = api.runtime.media;
     expect(media.detectMime).toBe(runtime.media.detectMime);
     const current = { ...builder.registry };
     const resource = (() => {
       const previous = Object.assign(new RetiredRegistry(), builder.registry);
       markPluginRegistryActive(previous);
-      const captured = instance.run(() => new AsyncResource("hosted-media-retention"));
+      const captured = owner.run(() => new AsyncResource("hosted-media-retention"));
       markPluginRegistryActive(current);
       markPluginRegistryRetired(previous);
       return captured;
@@ -368,7 +367,7 @@ describe("plugin registry runtime config scope", () => {
       expect(readFile.mock.calls[1]?.[0]).toBe("hosted:fixture");
     } finally {
       resource.emitDestroy();
-      await instance.dispose();
+      await owner.dispose();
       markPluginRegistryRetired(current);
     }
   });
@@ -395,12 +394,11 @@ describe("plugin registry runtime config scope", () => {
           audit: { caller: { kind: "plugin", id: "pending-runtime" } },
         };
       };
-      const { builder, record, api } = registered("pending-runtime", {}, runtime);
-      const instance = expectDefined(getPluginInstance(record), "runtime instance");
+      const { builder, record, api, owner } = registered("pending-runtime", {}, runtime);
       markPluginRegistryActive(builder.registry);
       // Channel monitors retain instance custody without pinning a registry generation.
       const consumer =
-        mode === "custody" ? instance.retainConsumer(undefined, undefined, "custody") : undefined;
+        mode === "custody" ? owner.retainConsumer(undefined, undefined, "custody") : undefined;
       const successor = createEmptyPluginRegistry();
       successor.plugins.push(record);
       const pending = (() => {
@@ -429,7 +427,7 @@ describe("plugin registry runtime config scope", () => {
         resume.resolve();
         await Promise.allSettled([pending]);
         consumer?.release();
-        await instance.dispose();
+        await owner.dispose();
         markPluginRegistryRetired(successor);
       }
     },
@@ -448,7 +446,7 @@ describe("plugin registry runtime config scope", () => {
   });
 
   it("binds native compaction to the official global Codex harness", async () => {
-    const { builder, record, api } = registered("codex", {
+    const { builder, api, owner } = registered("codex", {
       source: "/plugins/node_modules/@openclaw/codex/index.js",
       origin: "global",
       packageName: "@openclaw/codex",
@@ -471,7 +469,7 @@ describe("plugin registry runtime config scope", () => {
     expect(nativeCompaction).toHaveBeenCalledWith(request);
     expect(nativeCompaction.mock.contexts[0]).toBe(options);
     expect(registration.harness).not.toHaveProperty("compactNative");
-    await expectDefined(getPluginInstance(record), "compaction owner").dispose();
+    await owner.dispose();
     expect(() => compact(request)).toThrow(/reloaded|disabled|retiring/);
     expect(nativeCompaction).toHaveBeenCalledTimes(1);
   });
@@ -516,17 +514,7 @@ describe("plugin registry runtime config scope", () => {
     });
     const { api } = registered("diagnostic-plugin", { name: "Diagnostic Plugin" }, runtime);
 
-    let thrown: unknown;
-    try {
-      void api.runtime.version;
-    } catch (error) {
-      thrown = error;
-    }
-
-    expect(thrown).toBeInstanceOf(Error);
-    if (!(thrown instanceof Error)) {
-      throw new Error("expected runtime resolution failure");
-    }
+    const thrown = captureThrownError(() => api.runtime.version);
     for (const text of [
       "Unable to resolve plugin runtime module",
       "pluginRuntimeContext=pluginId:diagnostic-plugin",

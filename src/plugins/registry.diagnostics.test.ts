@@ -57,17 +57,12 @@ describe("plugin registration diagnostics", () => {
 
       api.registerCliBackend(backend);
 
-      expect(registry.diagnostics).toEqual(
-        diagnostics(
-          "acme-plugin",
-          "warn",
-          warns
-            ? [
-                'cli backend "acme-cli" is missing modelProvider; provider-to-runtime binding will be skipped. Set modelProvider to the canonical model provider id to enable this binding.',
-              ]
-            : [],
-        ),
-      );
+      const messages = warns
+        ? [
+            'cli backend "acme-cli" is missing modelProvider; provider-to-runtime binding will be skipped. Set modelProvider to the canonical model provider id to enable this binding.',
+          ]
+        : [];
+      expect(registry.diagnostics).toEqual(diagnostics("acme-plugin", "warn", messages));
       expect(registry.cliBackends).toEqual([
         expect.objectContaining({ pluginId: "acme-plugin", backend }),
       ]);
@@ -96,22 +91,21 @@ describe("plugin registration diagnostics", () => {
     alphaApi.on("unknown-hook", () => {});
     betaApi.registerRuntimeLifecycle({ id: "" });
 
-    const betaSource = "/plugins/beta/index.ts";
     const expected = [
-      ["error", "alpha", alphaSource, "service registration missing id"],
-      ["error", "beta", betaSource, "context engine registration missing id"],
-      ["warn", "alpha", alphaSource, "reload registration missing prefixes"],
-      [
-        "warn",
-        "beta",
-        betaSource,
-        "text transform registration has no input or output replacements",
-      ],
-      ["error", "alpha", alphaSource, "memory prompt supplement registration missing builder"],
-      ["error", "beta", betaSource, "hosted media resolver registration missing resolver"],
-      ["warn", "alpha", alphaSource, 'unknown typed hook "unknown-hook" ignored'],
-      ["error", "beta", betaSource, "runtime lifecycle registration missing id"],
-    ].map(([level, pluginId, source, message]) => ({ level, pluginId, source, message }));
+      ["error", "alpha", "service registration missing id"],
+      ["error", "beta", "context engine registration missing id"],
+      ["warn", "alpha", "reload registration missing prefixes"],
+      ["warn", "beta", "text transform registration has no input or output replacements"],
+      ["error", "alpha", "memory prompt supplement registration missing builder"],
+      ["error", "beta", "hosted media resolver registration missing resolver"],
+      ["warn", "alpha", 'unknown typed hook "unknown-hook" ignored'],
+      ["error", "beta", "runtime lifecycle registration missing id"],
+    ].map(([level, pluginId, message]) => ({
+      level,
+      pluginId,
+      message,
+      source: pluginId === "alpha" ? alphaSource : "/plugins/beta/index.ts",
+    }));
     expect(registry.diagnostics).toEqual(expected);
     expect(registry.contextEngines.size).toBe(0);
     expect(registry).toMatchObject({
@@ -257,21 +251,11 @@ describe("plugin registration diagnostics", () => {
   });
 });
 
-class ClassBackedLifecycleService {
-  starts = 0;
-
-  constructor(readonly id: string) {}
-
-  start() {
-    this.starts += 1;
-  }
-}
-
 describe("plugin service registration identity", () => {
   it("preserves native service descriptors through canonical reload and cleanup", async () => {
-    const { builder, createRecord } = createRegistrationFixture();
+    const { builder, registry, createRecord } = createRegistrationFixture();
     const record = createRecord("native-service-owner");
-    const instance = new PluginInstance(record.id, { record, registry: builder.registry });
+    const instance = new PluginInstance(record.id, { record, registry });
     const store = createPluginRuntimeStore<object>("native service runtime missing");
     const runtime = {};
     const calls: Array<{ phase: string; value: number; runtime: object | null }> = [];
@@ -298,10 +282,10 @@ describe("plugin service registration identity", () => {
       store.setRuntime(runtime);
       builder.createApi(record, { config: {} }).registerService(service);
     });
-    expect(builder.registry.services).toHaveLength(1);
-    expect(builder.registry.services[0]?.service).toBe(service);
+    expect(registry.services).toHaveLength(1);
+    expect(registry.services[0]?.service).toBe(service);
     expect(record.services).toEqual(["native-service"]);
-    const services = await startPluginServices({ registry: builder.registry, config: {} });
+    const services = await startPluginServices({ registry, config: {} });
     try {
       await services.reload({}, new Set(["native-service"]));
       await services.stop();
@@ -367,14 +351,14 @@ describe("plugin service registration identity", () => {
   });
 
   it("retains the first service when a different owner claims its normalized ID", async () => {
-    const { builder, createRecord } = createRegistrationFixture();
-    const first = createRecord("first-owner");
-    const second = createRecord("second-owner");
-    const firstService = new ClassBackedLifecycleService(" shared-service ");
-    const secondService = new ClassBackedLifecycleService("shared-service");
-    builder.createApi(first, { config: {} }).registerService(firstService);
-    builder.createApi(second, { config: {} }).registerService(secondService);
-    expect(builder.registry.services).toEqual([
+    const { registry, createPlugin } = createRegistrationFixture();
+    const { record: first, api: firstApi } = createPlugin("first-owner");
+    const { record: second, api: secondApi } = createPlugin("second-owner");
+    const firstService = { id: " shared-service ", start: vi.fn() };
+    const secondService = { id: "shared-service", start: vi.fn() };
+    firstApi.registerService(firstService);
+    secondApi.registerService(secondService);
+    expect(registry.services).toEqual([
       expect.objectContaining({
         pluginId: first.id,
         source: first.source,
@@ -382,19 +366,20 @@ describe("plugin service registration identity", () => {
         service: firstService,
       }),
     ]);
+    expect(registry.services[0]?.service).toBe(firstService);
     expect(first.services).toEqual(["shared-service"]);
     expect(second.services).toEqual([]);
-    expect(builder.registry.diagnostics).toEqual([
+    expect(registry.diagnostics).toEqual([
       expect.objectContaining({
         pluginId: second.id,
         message: "service already registered: shared-service (first-owner)",
       }),
     ]);
-    setActivePluginRegistry(builder.registry);
-    const handle = await startPluginServices({ registry: builder.registry, config: {} });
+    setActivePluginRegistry(registry);
+    const handle = await startPluginServices({ registry, config: {} });
     try {
-      expect(firstService.starts).toBe(1);
-      expect(secondService.starts).toBe(0);
+      expect(firstService.start).toHaveBeenCalledOnce();
+      expect(secondService.start).not.toHaveBeenCalled();
     } finally {
       await handle.stop();
     }

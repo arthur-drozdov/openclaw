@@ -11,6 +11,7 @@ import {
   resolveBundledPluginSourcePublicSurfacePath,
   resolvePluginRootPublicSurfacePath,
 } from "./public-surface-runtime.js";
+import { writeArtifact } from "./public-surface.test-support.js";
 import { createTestPluginRegistry } from "./registry-runtime.test-helpers.js";
 import { withPluginRuntimeRegistryScope } from "./runtime/gateway-request-scope.js";
 import { createPluginRecord } from "./status.test-helpers.js";
@@ -22,11 +23,6 @@ const noBundledPluginOverrideEnv = {
   OPENCLAW_BUNDLED_PLUGINS_DIR: undefined,
   OPENCLAW_DISABLE_BUNDLED_PLUGINS: undefined,
 } satisfies NodeJS.ProcessEnv;
-function writeArtifact(filename: string, contents = "export {};\n") {
-  fs.mkdirSync(path.dirname(filename), { recursive: true });
-  fs.writeFileSync(filename, contents);
-  return filename;
-}
 function resolveBundled(
   rootDir: string,
   overrides: Partial<Parameters<typeof resolveBundledPluginPublicSurfacePath>[0]> = {},

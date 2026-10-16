@@ -1,4 +1,5 @@
 import "../test-utils/prepare-compiled-subprocesses.js";
+import assert from "node:assert/strict";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, onTestFinished, vi } from "vitest";
 import { awaitGateBeforeSettlement } from "../../test/helpers/promise.js";
@@ -29,6 +30,7 @@ import { createPluginRuntime } from "./runtime/index.js";
 const dirs = useAutoCleanupTempDirTracker(afterAll);
 const authority = { assertCurrent() {}, authorize() {} };
 const lifetime = { assertCurrent() {}, assertReadable() {} };
+const lockedHarnessEntry = { agentHarnessId: "test-harness", modelSelectionLocked: true as const };
 let stateDir: string;
 let storePath: string;
 
@@ -40,9 +42,7 @@ async function withMemoryActor<T>(
     { agentId: "main", storePath, sessionKey },
     { authority, lifetime, create: true },
   );
-  if (!binding) {
-    throw new Error("Expected memory acquisition");
-  }
+  assert(binding, "Expected memory acquisition");
   try {
     return await run(binding);
   } finally {
@@ -70,8 +70,10 @@ async function createMemoryEntry(sessionId: string, entry: Partial<InternalSessi
 
 function observeSql() {
   const sql = observeHostDataSql();
-  onTestFinished(() => sql.restore());
-  return sql;
+  onTestFinished(() => {
+    sql.restore();
+    expect(sql.queries).toEqual([]);
+  });
 }
 
 beforeAll(() => {
@@ -93,36 +95,30 @@ afterEach(() => vi.restoreAllMocks());
 
 function registry() {
   const subagent = createOwnershipSubagent("unexpected", "");
-  const subagentRun = subagent.run;
   const runtime = createPluginRuntime({ subagent });
   const plugins = createOwnershipRegistry(runtime);
   const { api: owner } = plugins.createApi("owner");
   const { api: caller } = plugins.createApi("caller");
   const delegatedExecutionPluginIds = ["caller"];
-  const harness = createOwnershipHarness("test-harness", {
-    label: "Test harness",
-    delegatedExecutionPluginIds,
-  });
-  owner.registerAgentHarness(harness);
-  return { runtime, owner, caller, harness, subagentRun, delegatedExecutionPluginIds };
+  owner.registerAgentHarness(
+    createOwnershipHarness("test-harness", { delegatedExecutionPluginIds }),
+  );
+  return { runtime, owner, caller, subagent, delegatedExecutionPluginIds };
 }
 
 it("keeps memory ownership and by-ID checks out of host SQL", async () => {
-  const { owner, caller, subagentRun } = registry();
+  const { owner, caller, subagent } = registry();
   const sessionId = "plugin-owned";
-  const key = await createMemoryEntry(sessionId, {
-    agentHarnessId: "test-harness",
-    modelSelectionLocked: true,
-  });
-  const sql = observeSql();
+  const key = await createMemoryEntry(sessionId, lockedHarnessEntry);
+  observeSql();
   await expect(
     caller.runtime.subagent.run({ sessionKey: key, message: "forbidden" }),
   ).rejects.toThrow('owned by plugin "owner"');
-  await withMemorySession(key, async () => {
-    await expect(caller.runtime.gateway.request("sessions.abort", { sessionId })).rejects.toThrow(
+  await withMemorySession(key, () =>
+    expect(caller.runtime.gateway.request("sessions.abort", { sessionId })).rejects.toThrow(
       'owned by plugin "owner"',
-    );
-  });
+    ),
+  );
   const session = owner.runtime.agent.session;
   const target = { sessionKey: key, storePath };
   const displayName = "owned update";
@@ -130,8 +126,7 @@ it("keeps memory ownership and by-ID checks out of host SQL", async () => {
     session.patchSessionEntry({ ...target, update: () => ({ displayName }) }),
   ).resolves.toMatchObject({ displayName });
   await expect(session.getSessionEntryAsync(target)).resolves.toMatchObject({ displayName });
-  expect(subagentRun).not.toHaveBeenCalled();
-  expect(sql.queries).toEqual([]);
+  expect(subagent.run).not.toHaveBeenCalled();
 });
 
 it("classifies sandbox authority from its captured actor despite a different configured store", async () => {
@@ -153,7 +148,7 @@ it("classifies sandbox authority from its captured actor despite a different con
     },
   };
   const params = { config, agentId: "main", sessionKey, storePath };
-  const sql = observeSql();
+  observeSql();
   await withMemorySession(sessionKey, async () => {
     const sandbox = owner.runtime.sandbox;
     const expected = {
@@ -166,17 +161,13 @@ it("classifies sandbox authority from its captured actor despite a different con
       sandbox.prepareWorkspaceAuthority({ ...params, workspaceDir: "/workspace" }),
     ).resolves.toEqual(expected);
   });
-  expect(sql.queries).toEqual([]);
 });
 
 it("rechecks delegated harness authority after admission waits", async () => {
   setRuntimeConfigSnapshot({});
   onTestFinished(clearRuntimeConfigSnapshot);
-  const { runtime, caller, harness, delegatedExecutionPluginIds } = registry();
-  const key = await createMemoryEntry("delegated", {
-    agentHarnessId: harness.id,
-    modelSelectionLocked: true,
-  });
+  const { runtime, caller, delegatedExecutionPluginIds } = registry();
+  const key = await createMemoryEntry("delegated", lockedHarnessEntry);
   const entered = createDeferredCore();
   const release = createDeferredCore();
   const original = runtime.agent.session.runWithWorkAdmission;
@@ -186,7 +177,7 @@ it("rechecks delegated harness authority after admission waits", async () => {
     return original(params, run);
   };
   const run = vi.fn(async () => "must-not-run");
-  const sql = observeSql();
+  observeSql();
   onTestFinished(() => release.resolve());
   const work = withMemorySession(key, () =>
     caller.runtime.agent.session.runWithWorkAdmission({ storePath, sessionKey: key }, run),
@@ -197,23 +188,21 @@ it("rechecks delegated harness authority after admission waits", async () => {
   release.resolve();
   await rejected;
   expect(run).not.toHaveBeenCalled();
-  expect(sql.queries).toEqual([]);
 });
 
 it.each(["finalize", "rollback", "changed" as const])(
   "%s retains the exact actor initializer",
   async (outcome) => {
-    const { owner, harness } = registry();
+    const { owner } = registry();
     const initialEntry = {
-      agentHarnessId: harness.id,
-      modelSelectionLocked: true as const,
+      ...lockedHarnessEntry,
       pluginExtensions: { test: { initializing: true } },
     };
     const key = await createMemoryEntry(`initialize-${outcome}`, {
       ...initialEntry,
       initializationPending: true,
     });
-    const sql = observeSql();
+    observeSql();
     await withMemorySession(key, async () => {
       const session = owner.runtime.agent.session;
       const target = { sessionKey: key, storePath };
@@ -223,9 +212,7 @@ it.each(["finalize", "rollback", "changed" as const])(
         initialEntry,
         recoverMatchingInitialEntry: true,
         afterCreate: async ({ initialization }) => {
-          if (!initialization) {
-            throw new Error("session creation did not supply its initializer");
-          }
+          assert(initialization, "session creation did not supply its initializer");
           initialization.assertCurrent();
           if (outcome === "rollback") {
             throw new Error("initializer rejected");
@@ -241,11 +228,9 @@ it.each(["finalize", "rollback", "changed" as const])(
         },
       });
       if (outcome === "finalize") {
-        const created = await creation;
-        expect(created).toMatchObject({
-          entry: { pluginExtensions: { test: { initialized: true } } },
-        });
-        expect(created.entry.initializationPending).toBeUndefined();
+        const { entry } = await creation;
+        expect(entry).toMatchObject({ pluginExtensions: { test: { initialized: true } } });
+        expect(entry.initializationPending).toBeUndefined();
       } else {
         await expect(creation).rejects.toThrow(
           outcome === "rollback" ? "initializer rejected" : "guarded rollback did not complete",
@@ -254,33 +239,30 @@ it.each(["finalize", "rollback", "changed" as const])(
       const stored = await session.getSessionEntryAsync(target);
       if (outcome === "rollback") {
         expect(stored).toBeUndefined();
-      }
-      if (outcome === "changed") {
+      } else if (outcome === "changed") {
         expect(stored?.displayName).toBe("concurrent owner");
       }
     });
-    expect(sql.queries).toEqual([]);
   },
 );
 
 it("hands memory creation to the existing Gateway creator", async () => {
-  const { owner, harness } = registry();
+  const { owner } = registry();
   const create = vi
     .spyOn(gatewayCreation, "createGatewaySession")
     .mockRejectedValue(new Error("creator refused"));
   const key = "agent:main:dashboard:incognito-plugin-create";
-  const sql = observeSql();
+  observeSql();
   await expect(
     withMemorySession(key, () =>
       owner.runtime.agent.session.createSessionEntry({
         cfg: {},
         key,
-        initialEntry: { agentHarnessId: harness.id, modelSelectionLocked: true },
+        initialEntry: lockedHarnessEntry,
       }),
     ),
   ).rejects.toThrow("creator refused");
   expect(create).toHaveBeenCalledWith(
-    expect.objectContaining({ key, incognito: true, authorizedAgentHarnessId: harness.id }),
+    expect.objectContaining({ key, incognito: true, authorizedAgentHarnessId: "test-harness" }),
   );
-  expect(sql.queries).toEqual([]);
 });

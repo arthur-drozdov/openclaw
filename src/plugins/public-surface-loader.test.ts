@@ -10,15 +10,11 @@ import { spawnNodeEvalSync } from "../test-utils/node-process.js";
 import { withMockedWindowsPlatform } from "../test-utils/vitest-spies.js";
 import { resetPluginCache } from "./plugin-cache.js";
 import { pluginProcessRuntimeEntrypoints } from "./process-runtime.test-support.js";
+import { captureThrownError, writeArtifact } from "./public-surface.test-support.js";
 
 const tempDirs = createTempDirTracker();
 const publicArtifact = { dirName: "demo", artifactBasename: "api.js" };
 const candidateArtifacts = { dirName: "demo", artifactCandidates: ["api.js", "runtime-api.js"] };
-function writeArtifact(filename: string, contents: string) {
-  fs.mkdirSync(path.dirname(filename), { recursive: true });
-  fs.writeFileSync(filename, contents);
-  return filename;
-}
 function setBundledDir(bundledPluginsDir: string, trust = true) {
   vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", bundledPluginsDir);
   if (trust) {
@@ -56,17 +52,6 @@ function mockNativeMarker() {
   }));
 }
 
-function captureThrownError(run: () => unknown): Error {
-  try {
-    run();
-  } catch (error) {
-    if (error instanceof Error) {
-      return error;
-    }
-    throw error;
-  }
-  throw new Error("Expected function to throw");
-}
 afterEach(() => {
   resetPluginCache();
   tempDirs.cleanup();
