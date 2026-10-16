@@ -202,7 +202,7 @@ async function startRuntime(
 }
 
 it.each(["reparented", "unchanged ppid"])(
-  "terminates maintenance with a lost launcher (%s) before renewing",
+  "settles maintenance with a lost launcher (%s) before forced termination",
   async (kind) => {
     const rootPath = path.join(tempDirs.make("openclaw-owner-orphan-"), "root.lock");
     const raw = JSON.stringify({
@@ -219,9 +219,11 @@ it.each(["reparented", "unchanged ppid"])(
     const kill = vi.spyOn(process, "kill").mockReturnValue(true);
     const runtime = await startRuntime({ [rootPath]: raw });
     try {
-      expect(kill).toHaveBeenCalledExactlyOnceWith(process.pid, "SIGKILL");
-      expect(fs.statSync(rootPath).mtimeMs).toBe(oldStamp.getTime());
-      expect(vi.getTimerCount()).toBe(0);
+      expect(runtime.readEvents()).toContain("parent-lost");
+      expect(kill).not.toHaveBeenCalled();
+      expect(fs.statSync(rootPath).mtimeMs).toBeGreaterThan(oldStamp.getTime());
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(kill).toHaveBeenLastCalledWith(process.pid, "SIGKILL");
     } finally {
       await runtime.stop();
     }

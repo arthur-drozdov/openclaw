@@ -15,6 +15,7 @@ import {
   type Mock,
   type MockInstance,
 } from "vitest";
+import { CLI_PARENT_BOUND_PRELOAD } from "../cli-parent-lifetime.mjs";
 import { awaitGateBeforeSettlement } from "../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../test/helpers/temp-dir.js";
 import {
@@ -237,7 +238,14 @@ describe("entry compile cache", () => {
       expect(spawn).toHaveBeenCalledOnce();
       const [command, args, options] = expectDefined(spawn.mock.calls[0], "respawn call");
       expect(command).toBe(process.execPath);
-      expect(args).toEqual(["--no-warnings", entryFile, "status", "--json"]);
+      expect(args).toEqual([
+        "--import",
+        CLI_PARENT_BOUND_PRELOAD,
+        "--no-warnings",
+        entryFile,
+        "status",
+        "--json",
+      ]);
       expect(options?.env?.NODE_DISABLE_COMPILE_CACHE).toBe("1");
       expect(options?.env?.OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED).toBe("1");
       expect(options?.env?.NODE_COMPILE_CACHE).toBeUndefined();

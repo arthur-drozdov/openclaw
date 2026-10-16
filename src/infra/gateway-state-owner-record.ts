@@ -4,13 +4,13 @@ import path from "node:path";
 import { isMainThread } from "node:worker_threads";
 import { extractErrorCode } from "@openclaw/normalization-core/error-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { getCliParentPid } from "../../cli-parent-lifetime.mjs";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { getFileLockProcessStartTime, isPidAlive } from "../shared/pid-alive.js";
 import { resolveOpenClawStateDirForDatabasePath } from "../state/openclaw-state-db.paths.js";
 import {
   classifyGatewayLockProcessNamespace,
   GatewayLockNamespaceError,
-  isGatewayMaintenanceParentStale,
   parseGatewayLockPayload,
   readGatewayLockProcessNamespace,
   type LockPayload,
@@ -97,9 +97,6 @@ export function assertPersistedStateDatabaseAccessAllowed(params: {
   if (isGatewayStateOwnerDefinitelyStale(owner, ownerPath)) {
     return;
   }
-  if (owner.pid === process.pid && isGatewayMaintenanceParentStale(owner)) {
-    throw new StateDatabaseAccessError("Offline maintenance lost its launcher; retry the command.");
-  }
   // Workers share the process PID, but their schema authority still comes from
   // the host operation's retained lease and is never inferred from this record.
   if (owner.pid === process.pid && !isMainThread) {
@@ -126,7 +123,8 @@ export function assertPersistedStateDatabaseAccessAllowed(params: {
 export function defaultPayload(databasePath: string): LockPayload {
   const stateDir = resolveOpenClawStateDirForDatabasePath(databasePath);
   const startTime = getFileLockProcessStartTime(process.pid);
-  const parentStartTime = getFileLockProcessStartTime(process.ppid);
+  const parentPid = getCliParentPid();
+  const parentStartTime = parentPid === undefined ? null : getFileLockProcessStartTime(parentPid);
   return {
     pid: process.pid,
     ownerId: randomUUID(),
@@ -135,7 +133,7 @@ export function defaultPayload(databasePath: string): LockPayload {
     configPath: path.join(stateDir, "openclaw.json"),
     role: "sqlite-maintenance",
     processNamespace: readGatewayLockProcessNamespace(),
-    parentPid: process.ppid,
+    ...(parentPid === undefined ? {} : { parentPid }),
     ...(parentStartTime === null ? {} : { parentStartTime }),
     ...(startTime === null ? {} : { startTime }),
   };

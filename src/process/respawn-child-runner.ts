@@ -1,5 +1,6 @@
 import type { spawn } from "node:child_process";
 import os from "node:os";
+import { CLI_PARENT_BOUND_PRELOAD } from "../../cli-parent-lifetime.mjs";
 import type { attachChildProcessBridge } from "./child-process-bridge.js";
 import { signalProcessTree } from "./kill-tree.js";
 
@@ -25,7 +26,7 @@ export function runRespawnChildWithSignalBridge(params: {
   const stdioIsTerminal = params.stdioIsTerminal ?? (process.stdin.isTTY || process.stdout.isTTY);
   const detachForProcessTree =
     params.detachForProcessTree === true && process.platform !== "win32" && !stdioIsTerminal;
-  const child = runtime.spawn(command, args, {
+  const child = runtime.spawn(command, ["--import", CLI_PARENT_BOUND_PRELOAD, ...args], {
     stdio: ["inherit", "inherit", "inherit", "ipc"],
     env,
     detached: detachForProcessTree,

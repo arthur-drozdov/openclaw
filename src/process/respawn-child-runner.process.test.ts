@@ -1,33 +1,42 @@
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { expect, it } from "vitest";
+import { CLI_PARENT_BOUND_PRELOAD } from "../../cli-parent-lifetime.mjs";
 import { resolveTestNodeExecPath } from "../test-utils/node-process.js";
 
-it.each([false, true])(
-  "respawn parent channel preserves natural exit and ends orphan work (busy=%s)",
-  async (busy) => {
+it.each(["complete", "parent-bound"] as const)(
+  "respawn lifetime preserves %s completion",
+  async (lifetime) => {
     const source = `
-    import { watchCliRespawnParent } from ${JSON.stringify(new URL("../../node-runtime-recovery.mjs", import.meta.url).href)};
-    watchCliRespawnParent();
-    process.send("ready");
-    ${busy ? "setInterval(() => {}, 1000);" : ""}
-  `;
-    const child = spawn(resolveTestNodeExecPath(), ["--input-type=module", "-e", source], {
-      stdio: ["ignore", "pipe", "pipe", "ipc"],
+      import { watchCliRespawnParent } from ${JSON.stringify(new URL("../../cli-parent-lifetime.mjs", import.meta.url).href)};
+      watchCliRespawnParent();
+      const timer = ${lifetime === "complete" ? "undefined" : "setInterval(() => {}, 1000)"};
+      process.once("SIGTERM", () => { clearInterval(timer); process.stdout.write("settled"); });
+
+      process.send("ready");
+    `;
+    const child = spawn(
+      resolveTestNodeExecPath(),
+      ["--import", CLI_PARENT_BOUND_PRELOAD, "--input-type=module", "-e", source],
+      { stdio: ["ignore", "pipe", "pipe", "ipc"] },
+    );
+    let stdout = "";
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk;
     });
-    const closed = once(child, "close");
+    const exited = once(child, "exit");
     try {
-      const ready = await once(child, "message");
-      expect(ready[0]).toBe("ready");
-      if (busy) {
+      expect((await once(child, "message"))[0]).toBe("ready");
+      if (lifetime === "parent-bound") {
         child.disconnect();
       }
-      expect(await closed).toEqual(busy ? [null, "SIGKILL"] : [0, null]);
+      expect(await exited).toEqual([0, null]);
+      expect(stdout).toBe(lifetime === "parent-bound" ? "settled" : "");
     } finally {
       if (child.exitCode === null && child.signalCode === null) {
         child.kill("SIGKILL");
       }
-      await closed;
+      await exited;
     }
   },
 );

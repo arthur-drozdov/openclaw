@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import type { MessagePort } from "node:worker_threads";
 import { coerceErrorMessage } from "@openclaw/normalization-core/error-coercion";
+import { requestCliParentTermination } from "../../cli-parent-lifetime.mjs";
 import { hasErrnoCode } from "./errno.js";
 import {
   isGatewayMaintenanceParentStale,
@@ -99,11 +100,12 @@ export function runGatewayStateOwnerHeartbeat(
     data.events.close();
     parent?.close();
   };
+  let parentLost = false;
   const beat = () => {
-    // A blocked Doctor cannot handle IPC disconnect; its worker still observes reparenting.
-    if (owner?.pid === process.pid && isGatewayMaintenanceParentStale(owner)) {
-      process.kill(process.pid, "SIGKILL");
-      return;
+    // Keep renewing custody while cancellation settles; peers must not race its rollback.
+    if (!parentLost && owner?.pid === process.pid && isGatewayMaintenanceParentStale(owner)) {
+      parentLost = true;
+      requestCliParentTermination(() => data.events.postMessage("parent-lost", []));
     }
     let failure: string | null = null;
     let renewedAt: bigint | undefined;
