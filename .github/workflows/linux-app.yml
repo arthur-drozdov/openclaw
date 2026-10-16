@@ -404,8 +404,6 @@ jobs:
     # Match the regular Windows installer build runner.
     runs-on: windows-2022
     timeout-minutes: 105
-    env:
-      npm_config_cache: ${{ runner.temp }}/openclaw-desktop-npm-cache
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -449,6 +447,7 @@ jobs:
       - name: Build Windows installer without publishing
         working-directory: apps/linux/src-tauri
         env:
+          npm_config_cache: ${{ runner.temp }}/openclaw-desktop-npm-cache
           # Cold Windows declarations can exceed the package builder's 45-minute default.
           OPENCLAW_DOCKER_PACKAGE_BUILD_TIMEOUT_MS: "3600000"
         run: pnpm dlx @tauri-apps/cli@2.11.4 build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
