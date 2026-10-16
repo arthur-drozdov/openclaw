@@ -24,7 +24,6 @@ import {
 import type { PresencePayload } from "../../app/user-profile.ts";
 import type { MarkdownRenderOptions } from "../../components/markdown-render-options.ts";
 import type { SessionPanelToggleSlot } from "../../components/session-panel-toggle-buffer.ts";
-import { I18nController } from "../../i18n/lib/lit-controller.ts";
 import type {
   BoardCommandEvent,
   BoardProvider,
@@ -50,7 +49,6 @@ import {
   SubscriptionsController,
   viewState,
 } from "../../lib/subscriptions-controller.ts";
-import { PollController } from "../../lit/poll-controller.ts";
 import { ChatComposerCapabilityHost } from "./chat-composer-capability-host.tsx";
 import {
   CHAT_PANE_LIFECYCLE_CHANGED_EVENT,
@@ -84,7 +82,6 @@ import type { SessionSnapshotStore } from "./session-snapshot-store.ts";
 import type { SidebarLayout } from "./sidebar-layout-types.ts";
 
 export abstract class ChatPaneBase extends ControllerHost {
-  protected readonly i18nController = new I18nController(this);
   private readonly changedProperties = new Map<PropertyKey, unknown>();
   private completeUpdate: (() => void) | undefined;
   private commitPromise: Promise<boolean> | undefined;
@@ -151,6 +148,7 @@ export abstract class ChatPaneBase extends ControllerHost {
   private paneLifecycleRoot: Element | null = null;
   // The first Solid render initializes hidden panes; later hidden work parks.
   private readonly handleVisibilityChange = () => {
+    this.requestUpdate();
     if (document.visibilityState !== "hidden") {
       return;
     }
@@ -203,14 +201,6 @@ export abstract class ChatPaneBase extends ControllerHost {
     paneRoot?.dispatchEvent(new Event(CHAT_PANE_LIFECYCLE_CHANGED_EVENT));
   }
 
-  // Relative labels still need a minute tick; external PR state is server-pushed.
-  readonly minutePoll = new PollController(
-    this,
-    60_000,
-    () => this.requestUpdate(),
-    true,
-    "visible",
-  );
   @viewState()
   mcpAppLaunch?: import("../../components/mcp-app-launch.ts").McpAppOpenDetail;
   @viewState() paneId = "single";

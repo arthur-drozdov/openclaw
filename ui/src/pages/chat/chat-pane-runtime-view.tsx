@@ -8,7 +8,9 @@ import {
   untrack,
 } from "solid-js";
 import { projectProgressCard } from "../../lib/reactive/domain-keyed.ts";
+import { i18nRevision } from "../../lib/reactive/i18n.ts";
 import { projectOwner } from "../../lib/reactive/projection.ts";
+import { useVisiblePoll } from "../../lib/reactive/visible-poll.ts";
 import { ChatComposerCapabilityDialogs } from "./chat-composer-capability-host.tsx";
 import { PaneLayout } from "./chat-pane-layout-view.tsx";
 import type { ChatPaneRuntime } from "./chat-pane-render.ts";
@@ -58,13 +60,14 @@ function MountedChatPaneRuntime(props: { runtime: ChatPaneRuntime }) {
     cacheProgress();
     return stop;
   });
-  const visibilityChanged = () => runtime.requestUpdate();
-  document.addEventListener("visibilitychange", visibilityChanged);
+  // Relative labels tick only while this retained pane is presented.
+  const minutePoll = useVisiblePoll(60_000, () => runtime.requestUpdate());
   const lifecycle = createSolidRenderLifecycle({
     host: runtime.element,
     presented: () => owner.read().presented && document.visibilityState !== "hidden",
     read: () => {
       progress.read();
+      i18nRevision();
       runtime.prepareRender();
       return runtime.render(() => providerReview);
     },
@@ -76,13 +79,19 @@ function MountedChatPaneRuntime(props: { runtime: ChatPaneRuntime }) {
     readState: () => runtime.readProviderReviewState(),
   });
   createEffect(
-    () => frame(),
-    () => runtime.commitRender(),
+    () => ({ frame: frame(), presented: owner.read().presented }),
+    (next, previous) => {
+      if (next.frame !== previous?.frame) {
+        runtime.commitRender();
+      }
+      if (next.presented) {
+        minutePoll.start();
+      } else {
+        minutePoll.stop();
+      }
+    },
   );
-  onCleanup(() => {
-    unsubscribe();
-    document.removeEventListener("visibilitychange", visibilityChanged);
-  });
+  onCleanup(unsubscribe);
   return (
     <>
       <PaneLayout layout={frame().layout} />
