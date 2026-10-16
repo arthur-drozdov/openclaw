@@ -116,21 +116,16 @@ describe("installPackageDir", () => {
     );
   }
 
-  async function installWithNpmResult(
-    npmResult: SpawnResult | Promise<SpawnResult>,
-    activity?: import("./install-progress.js").InstallActivityObserver["activity"],
-  ) {
-    const { sourceDir, targetDir } = await createSourceFixture();
-    await writeManifest(sourceDir);
-    vi.mocked(runCommandWithTimeout).mockImplementation(() => Promise.resolve(npmResult));
-
-    return await installPackageDir({
-      ...updateOptions(sourceDir, targetDir),
-      mode: "install",
+  async function createNpmFixture(overrides?: Parameters<typeof writeManifest>[1]) {
+    const fixture = await createSourceFixture();
+    await writeManifest(fixture.sourceDir, overrides);
+    const options = {
+      ...updateOptions(fixture.sourceDir, fixture.targetDir),
+      mode: "install" as const,
       hasDeps: true,
       depsLogMessage: "Installing deps…",
-      logger: { activity },
-    });
+    };
+    return { ...fixture, options };
   }
 
   afterEach(async () => {
@@ -142,10 +137,13 @@ describe("installPackageDir", () => {
     "reports dependency settlement only after npm finishes with code %s",
     async (code) => {
       const pending = createDeferred<SpawnResult>();
+      const { options } = await createNpmFixture();
       const events: import("../../packages/gateway-protocol/src/schema/plugins.js").PluginInstallActivity[] =
         [];
-      const install = installWithNpmResult(pending.promise, (event) => {
-        events.push(event);
+      vi.mocked(runCommandWithTimeout).mockReturnValue(pending.promise);
+      const install = installPackageDir({
+        ...options,
+        logger: { activity: (event) => events.push(event) },
       });
       try {
         await vi.waitFor(() =>
@@ -390,10 +388,10 @@ describe("installPackageDir", () => {
         },
       });
 
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.error).toContain("Refusing to move hardlinked file");
-      }
+      expect(result).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("Refusing to move hardlinked file"),
+      });
       await expectMissingPath(path.join(targetDir, "marker.txt"));
     },
   );
@@ -464,9 +462,8 @@ describe("installPackageDir", () => {
   );
 
   it("hides the staged project .npmrc while npm install runs and restores it afterward", async () => {
-    const { sourceDir, targetDir } = await createSourceFixture();
+    const { sourceDir, targetDir, options } = await createNpmFixture();
     const npmrcContent = "git=calc.exe\n";
-    await writeManifest(sourceDir);
     await fs.writeFile(path.join(sourceDir, ".npmrc"), npmrcContent, "utf-8");
 
     vi.mocked(runCommandWithTimeout).mockImplementation(async (_argv, optionsOrTimeout) => {
@@ -481,14 +478,7 @@ describe("installPackageDir", () => {
       return npmSuccess;
     });
 
-    const result = await installPackageDir({
-      ...updateOptions(sourceDir, targetDir),
-      mode: "install",
-      hasDeps: true,
-      depsLogMessage: "Installing deps…",
-    });
-
-    expect(result).toEqual({ ok: true });
+    expect(await installPackageDir(options)).toEqual({ ok: true });
     await expectText(targetDir, npmrcContent, ".npmrc");
     await expect(
       listMatchingEntries(targetDir, ".openclaw-install-hidden-npmrc-"),
@@ -496,8 +486,7 @@ describe("installPackageDir", () => {
   });
 
   it("forces dependency installs to stay project-local when npm global config leaks in", async () => {
-    const { fixtureRoot, sourceDir, targetDir } = await createSourceFixture();
-    await writeManifest(sourceDir);
+    const { fixtureRoot, options: installOptions } = await createNpmFixture();
 
     vi.stubEnv("NPM_CONFIG_GLOBAL", "true");
     vi.stubEnv("npm_config_global", "true");
@@ -507,14 +496,7 @@ describe("installPackageDir", () => {
     vi.stubEnv("npm_config_prefix", path.join(fixtureRoot, "global-prefix"));
     vi.mocked(runCommandWithTimeout).mockResolvedValue(npmSuccess);
 
-    const result = await installPackageDir({
-      ...updateOptions(sourceDir, targetDir),
-      mode: "install",
-      hasDeps: true,
-      depsLogMessage: "Installing deps…",
-    });
-
-    expect(result).toEqual({ ok: true });
+    expect(await installPackageDir(installOptions)).toEqual({ ok: true });
     const expectedArgv = expectedNpmCommand([
       "install",
       "--omit=dev",
@@ -551,8 +533,7 @@ describe("installPackageDir", () => {
   it.each(["exit", "throw"] as const)(
     "restores manifest bytes before cleanup and preserves the old install on npm %s failure",
     async (failure) => {
-      const { sourceDir, targetDir } = await createSourceFixture();
-      await writeManifest(sourceDir, {
+      const { sourceDir, targetDir, options } = await createNpmFixture({
         dependencies: { bad: "workspace:^" },
         devDependencies: { openclaw: "2026.6.1" },
       });
@@ -586,10 +567,9 @@ describe("installPackageDir", () => {
       }
       const result = await installPackageDir(
         requestDeferredPackageDirInstall({
-          ...updateOptions(sourceDir, targetDir),
-          hasDeps: true,
+          ...options,
+          mode: "update",
           omitOpenClawHostDependency: true,
-          depsLogMessage: "Installing deps…",
           afterCopy: (dir: string) => {
             stagedDir = dir;
           },

@@ -36,26 +36,22 @@ beforeEach(() => {
   target = { agentId: "main", env };
 });
 
-const openDatabase = (databasePath?: string) =>
-  openOpenClawAgentDatabase({ ...target, path: databasePath });
+const openDatabase = (file?: string) => openOpenClawAgentDatabase({ ...target, path: file });
 const readRows = (db: DatabaseSync, columns = "run_id") =>
   db.prepare(`SELECT ${columns} FROM message_tool_run_outcomes ORDER BY id`).all();
-const readFirst = (db: DatabaseSync, query: string) => db.prepare(query).get();
 type Outcome = Parameters<typeof recordMessageToolRunOutcome>[0];
 
-function outcomeInput(runId: string, overrides: Partial<Outcome> = {}) {
-  return {
-    ...target,
-    sessionKey: "agent:main:main",
-    provider: "openai",
-    model: "gpt-5.6-luna",
-    outcome: "mute" as const,
-    runStatus: "completed" as const,
-    occurredAt: 100,
-    ...overrides,
-    runId,
-  };
-}
+const outcomeInput = (runId: string, overrides: Partial<Outcome> = {}) => ({
+  ...target,
+  sessionKey: "agent:main:main",
+  provider: "openai",
+  model: "gpt-5.6-luna",
+  outcome: "mute" as const,
+  runStatus: "completed" as const,
+  occurredAt: 100,
+  ...overrides,
+  runId,
+});
 
 const recordOutcome = (runId: string, overrides?: Parameters<typeof outcomeInput>[1]) =>
   recordMessageToolRunOutcome(outcomeInput(runId, overrides));
@@ -74,12 +70,11 @@ describe("message-tool run outcome store", () => {
     async (custom) => {
       const storePath = custom ? path.join(env.OPENCLAW_STATE_DIR!, "custom.sqlite") : undefined;
       const database = openDatabase(storePath);
-      const prepare = vi.spyOn(DatabaseSync.prototype, "prepare").mockImplementation(() => {
-        throw new Error("SQL ran on the caller");
-      });
-      const exec = vi.spyOn(DatabaseSync.prototype, "exec").mockImplementation(() => {
-        throw new Error("SQL ran on the caller");
-      });
+      const rejectCallerSql = () => expect.fail("SQL ran on the caller");
+      const prepare = vi
+        .spyOn(DatabaseSync.prototype, "prepare")
+        .mockImplementation(rejectCallerSql);
+      const exec = vi.spyOn(DatabaseSync.prototype, "exec").mockImplementation(rejectCallerSql);
       try {
         await recordOutcome("worker-boundary", { outcome: "tool_delivered", storePath });
       } finally {
@@ -139,18 +134,14 @@ describe("message-tool run outcome store", () => {
 
     await recordOutcome("newest", { outcome: "tool_delivered", occurredAt: 20_000 });
 
-    expect(
-      readFirst(
-        database.db,
-        "SELECT COUNT(*) AS count, MIN(occurred_at) AS oldest, MAX(occurred_at) AS newest FROM message_tool_run_outcomes",
-      ),
-    ).toEqual({ count: 10_000, oldest: 1, newest: 20_000 });
-    expect(
-      readFirst(
-        database.db,
-        "SELECT run_id FROM message_tool_run_outcomes ORDER BY occurred_at, id LIMIT 1",
-      ),
-    ).toEqual({ run_id: "seed-3" });
+    const retained = database.db
+      .prepare(`
+      SELECT COUNT(*) AS count, MIN(occurred_at) AS oldest, MAX(occurred_at) AS newest,
+        (SELECT run_id FROM message_tool_run_outcomes ORDER BY occurred_at, id LIMIT 1) AS first
+      FROM message_tool_run_outcomes
+    `)
+      .get();
+    expect(retained).toEqual({ count: 10_000, oldest: 1, newest: 20_000, first: "seed-3" });
   });
 
   it("preserves FIFO against other agent writes and captures queued inputs", async () => {
@@ -160,7 +151,7 @@ describe("message-tool run outcome store", () => {
     const input = outcomeInput("first");
     const first = recordMessageToolRunOutcome(input);
     const between = runOpenClawAgentWriteAdmission(target, () => readRows(db));
-    const second = recordOutcome("second", { ...input });
+    const second = recordOutcome("second", input);
     input.runId = "mutated";
     input.sessionKey = "agent:main:changed";
     env.OPENCLAW_STATE_DIR = tempDirs.make("openclaw-message-tool-unselected-");

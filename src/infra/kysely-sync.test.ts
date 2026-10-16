@@ -58,26 +58,22 @@ describe("kysely sync helpers", () => {
     });
     return visited;
   }
-  function expectRows<Row>(
-    query: Compilable<Row>,
-    rows: unknown,
-    times = 1,
-    connection = database,
-  ) {
+  const itemRows = (...names: string[]) => names.map((name, index) => ({ id: index + 1, name }));
+  function expectRows<Row>(query: Compilable<Row>, rows: unknown, times = 1) {
     for (let attempt = 0; attempt < times; attempt++) {
-      expect(executeSqliteQuerySync(connection, query).rows).toEqual(rows);
+      expect(run(query).rows).toEqual(rows);
     }
   }
-  function cachedRows(connection = database) {
-    const prepares = countPrepares(connection);
-    const query = getNodeSqliteKysely<SyncHelperTestDatabase>(connection)
-      .selectFrom("items")
-      .selectAll();
+  function cachedRows() {
+    const prepares = countPrepares(database);
+    const query = selectItems();
     return (rows: unknown, calls: number, times = 1) => {
-      expectRows(query, rows, times, connection);
-      expect(prepares.calls()).toBe(calls);
+      expectRows(query, rows, times);
+      expect(prepares()).toBe(calls);
     };
   }
+  const scalar = <Value>(name: string, value: string) =>
+    db.selectNoFrom((eb) => eb.fn<Value>(name, [eb.val(value)]).as("value"));
   function variableSelect(parameterCount: number) {
     return selectItems().where(
       "id",
@@ -100,6 +96,7 @@ describe("kysely sync helpers", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     clearNodeSqliteKyselyCacheForDatabase(database);
     database.close();
   });
@@ -131,18 +128,12 @@ describe("kysely sync helpers", () => {
       rows: [],
     });
     for (const name of ["first", "second", "third"]) {
-      expect(run(db.updateTable("items").set({ name }))).toEqual({
-        numAffectedRows: 1n,
-        rows: [],
-      });
+      expect(run(db.updateTable("items").set({ name }))).toEqual({ numAffectedRows: 1n, rows: [] });
       expect(
         first(db.selectFrom("items").select((eb) => eb.fn.countAll<number>().as("count"))),
       ).toEqual({ count: 1 });
     }
-    expect(run(db.deleteFrom("items"))).toEqual({
-      numAffectedRows: 1n,
-      rows: [],
-    });
+    expect(run(db.deleteFrom("items"))).toEqual({ numAffectedRows: 1n, rows: [] });
   });
 
   it("preserves raw readers and distinguishes writes with and without returned rows", () => {
@@ -159,14 +150,9 @@ describe("kysely sync helpers", () => {
 
     const update = db.updateTable("items").set({ name: "Grace" }).where("id", "=", 1);
     expect([...iterateSqliteQuerySync(database, update)]).toEqual([]);
-    expect(first(selectItems())).toEqual({
-      id: 1,
-      name: "Ada",
-    });
+    expect(first(selectItems())).toEqual(itemRows("Ada")[0]);
     expect(run(update)).toEqual({ rows: [], numAffectedRows: 1n });
-    expect([...iterateSqliteQuerySync(database, update.returningAll())]).toEqual([
-      { id: 1, name: "Grace" },
-    ]);
+    expect([...iterateSqliteQuerySync(database, update.returningAll())]).toEqual(itemRows("Grace"));
     const visited = trackVisits();
     database.exec("insert into items (id, name) values (2, 'Lin')");
     const rawRows = {
@@ -255,16 +241,16 @@ describe("kysely sync helpers", () => {
       };
       let read: (input: number) => Row[];
       if (mode === "first") {
-        const select = prepareSqliteQueryTakeFirstSync<number, Row>(database, build);
+        const select = prepareSqliteQueryTakeFirstSync(database, build);
         read = (input) => {
           const row = select(input);
           return row ? [row] : [];
         };
       } else if (mode === "eager") {
-        const select = prepareSqliteQuerySync<number, Row>(database, build);
+        const select = prepareSqliteQuerySync(database, build);
         read = (input) => select(input).rows;
       } else {
-        const select = prepareSqliteQueryIterator<number, Row>(database, build);
+        const select = prepareSqliteQueryIterator(database, build);
         read = (input) => [...select(input)];
       }
       database.function("nested_value", (value) => {
@@ -287,10 +273,7 @@ describe("kysely sync helpers", () => {
         .returningAll();
     const update = prepare(mode, build);
     for (const name of ["Lin", "Katherine"]) {
-      const rows = [
-        { id: 1, name },
-        { id: 2, name },
-      ];
+      const rows = itemRows(name, name);
       expect(update(name)).toEqual(mode === "first" ? rows[0] : { rows });
       expectRows(selectItems().orderBy("id"), rows);
     }
@@ -339,19 +322,13 @@ describe("kysely sync helpers", () => {
         expectRows(variableSelect(count), [], repeats);
       }
       if (expected !== null) {
-        expect(prepares.calls()).toBe(expected);
+        expect(prepares()).toBe(expected);
       }
     }
   });
 
   it("keeps nested prepared lazy iterations independent", () => {
-    database.exec(
-      "create table items (id integer primary key autoincrement, name text not null unique)",
-    );
-
-    for (const name of ["Ada", "Grace", "Lin"]) {
-      executeSqliteQuerySync(database, db.insertInto("items").values({ name }));
-    }
+    createItems(["Ada", "Grace", "Lin"], database, "unique");
     const select = selectItems().orderBy("id");
     const read = prepareSqliteQueryIterator<{ from: number }, Item>(database, (parameter) =>
       select.where(
@@ -370,7 +347,7 @@ describe("kysely sync helpers", () => {
     input.from = 3;
     const inner = read({ from: 1 });
     read({ from: 4 }).return?.();
-    expect(prepares.calls()).toBe(2);
+    expect(prepares()).toBe(2);
     expect(outer.next()).toEqual({ done: false, value: { id: 2, name: "Grace" } });
     expect(inner.next()).toEqual({ done: false, value: { id: 1, name: "Ada" } });
     outer.return?.();
@@ -378,7 +355,7 @@ describe("kysely sync helpers", () => {
       { id: 2, name: "Grace" },
       { id: 3, name: "Lin" },
     ]);
-    expect(prepares.calls()).toBe(4);
+    expect(prepares()).toBe(4);
     database.exec("drop table items");
   });
 
@@ -405,7 +382,7 @@ describe("kysely sync helpers", () => {
     }
     createItems(["Ada"]);
     const checkRows = cachedRows();
-    checkRows([{ id: 1, name: "Ada" }], 2, 3);
+    checkRows(itemRows("Ada"), 2, 3);
 
     database.setAuthorizer((actionCode, tableName) =>
       actionCode === constants.SQLITE_READ && tableName === "items"
@@ -415,7 +392,7 @@ describe("kysely sync helpers", () => {
     checkRows([{ id: null, name: null }], 5, 3);
 
     database.setAuthorizer(null);
-    checkRows([{ id: 1, name: "Ada" }], 6);
+    checkRows(itemRows("Ada"), 6);
   });
 
   it("does not cache while a dynamic SQLite authorizer is installed", () => {
@@ -428,28 +405,27 @@ describe("kysely sync helpers", () => {
     let allow = true;
     database.setAuthorizer(() => (allow ? constants.SQLITE_OK : constants.SQLITE_DENY));
 
-    expectRows(select, [{ id: 1, name: "Ada" }], 3);
-    expect(prepares.calls()).toBe(3);
+    expectRows(select, itemRows("Ada"), 3);
+    expect(prepares()).toBe(3);
 
     allow = false;
     expect(() => executeSqliteQuerySync(database, select)).toThrow(/not authorized/iu);
-    expect(prepares.calls()).toBe(4);
+    expect(prepares()).toBe(4);
   });
 
   it("does not retain oversized statement parameters", () => {
-    const lengthOf = (value: string) =>
-      db.selectNoFrom((eb) => eb.fn<number>("length", [eb.val(value)]).as("value"));
+    const lengthOf = (value: string) => scalar<number>("length", value);
     const prepares = countPrepares(database);
 
     expectRows(lengthOf("small"), [{ value: 5 }], 3);
-    expect(prepares.calls()).toBe(2);
+    expect(prepares()).toBe(2);
 
     for (const oversized of ["x".repeat(64 * 1024 + 1), "漢".repeat(24 * 1024)]) {
-      const before = prepares.calls();
+      const before = prepares();
       expectRows(lengthOf(oversized), [{ value: oversized.length }]);
-      expect(prepares.calls()).toBe(before + 1);
+      expect(prepares()).toBe(before + 1);
       expectRows(lengthOf("small"), [{ value: 5 }]);
-      expect(prepares.calls()).toBe(before + 1);
+      expect(prepares()).toBe(before + 1);
     }
 
     const oversizedExpression =
@@ -458,7 +434,7 @@ describe("kysely sync helpers", () => {
       );
     const oversizedSql = db.selectNoFrom(oversizedExpression.as("value"));
     expectRows(oversizedSql, [{ value: 1 }], 2);
-    expect(prepares.calls()).toBe(6);
+    expect(prepares()).toBe(6);
   });
 
   it("invalidates prepared statements when the database is deserialized", () => {
@@ -480,7 +456,7 @@ describe("kysely sync helpers", () => {
       });
     }
     const checkRows = cachedRows();
-    checkRows([{ id: 1, name: "Ada" }], 2, 3);
+    checkRows(itemRows("Ada"), 2, 3);
     database.deserialize(replacementBytes);
     checkRows([{ id: 2, name: "Grace" }], 3);
   });
@@ -491,41 +467,32 @@ describe("kysely sync helpers", () => {
     const prepares = countPrepares(database);
     const columns = vi.spyOn(StatementSync.prototype, "columns");
     const read = () => (mode === "eager" ? run(select).rows : [first(select)]);
-    try {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        expect(read()).toEqual([{ id: 1, name: "Ada" }]);
-      }
-      expect(prepares.calls()).toBe(2);
-
-      database.exec("alter table items add column note text not null default 'new'");
-
-      expect(read()).toEqual([{ id: 1, name: "Ada", note: "new" }]);
-      expect(prepares.calls()).toBe(2);
-      expect(columns).not.toHaveBeenCalled();
-    } finally {
-      columns.mockRestore();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      expect(read()).toEqual(itemRows("Ada"));
     }
+    expect(prepares()).toBe(2);
+    database.exec("alter table items add column note text not null default 'new'");
+    expect(read()).toEqual([{ id: 1, name: "Ada", note: "new" }]);
+    expect(prepares()).toBe(2);
+    expect(columns).not.toHaveBeenCalled();
   });
 
   it("resets a cached row statement after a step-time error", () => {
-    const jsonValue = (value: string) =>
-      db.selectNoFrom((eb) => eb.fn<string>("json", [eb.val(value)]).as("value"));
+    const jsonValue = (value: string) => scalar<string>("json", value);
     const prepares = countPrepares(database);
 
     expectRows(jsonValue("{}"), [{ value: "{}" }], 3);
-    expect(prepares.calls()).toBe(2);
+    expect(prepares()).toBe(2);
 
     expect(() => run(jsonValue("{"))).toThrow(/malformed JSON/iu);
     expectRows(jsonValue("[]"), [{ value: "[]" }]);
-    expect(prepares.calls()).toBe(2);
+    expect(prepares()).toBe(2);
   });
 
   it.each(["eager", "lazy"])(
     "reports query failures without replacing the original database error (%s)",
     (mode) => {
-      const malformedJson = db.selectNoFrom((eb) =>
-        eb.fn<string>("json", [eb.val("{")]).as("value"),
-      );
+      const malformedJson = scalar<string>("json", "{");
       const observed: unknown[] = [];
       registerNodeSqliteKyselyQueryErrorHandler(database, (error) => {
         observed.push(error);
@@ -547,26 +514,15 @@ describe("kysely sync helpers", () => {
   );
 
   it("clears cached statements before propagating a close failure", () => {
-    const cached = new DatabaseSync(":memory:");
-    createItems(["Ada"], cached);
+    createItems(["Ada"]);
     const closeError = new Error("synthetic close failure");
-    Object.defineProperty(cached, "close", {
-      configurable: true,
-      writable: true,
-      value(): never {
-        throw closeError;
-      },
+    vi.spyOn(database, "close").mockImplementation(() => {
+      throw closeError;
     });
-    const checkRows = cachedRows(cached);
-    try {
-      checkRows([{ id: 1, name: "Ada" }], 2, 3);
-      expect(() => cached.close()).toThrow(closeError);
-      checkRows([{ id: 1, name: "Ada" }], 3);
-    } finally {
-      clearNodeSqliteKyselyCacheForDatabase(cached);
-      delete (cached as { close?: DatabaseSync["close"] }).close;
-      cached.close();
-    }
+    const checkRows = cachedRows();
+    checkRows(itemRows("Ada"), 2, 3);
+    expect(() => database.close()).toThrow(closeError);
+    checkRows(itemRows("Ada"), 3);
   });
 
   it.each([
@@ -576,7 +532,7 @@ describe("kysely sync helpers", () => {
   ] as const)(
     "collects only released native resources after %s",
     (cleanup, databaseCollected, statementsCollected) => {
-      expect(runRetentionScenario({ cleanup })).toEqual({
+      expect(runRetentionScenario(cleanup)).toEqual({
         databaseCollected,
         statementsCollected,
         statementCount: 2,
@@ -587,7 +543,7 @@ describe("kysely sync helpers", () => {
   it.skipIf(typeof DatabaseSync.prototype[Symbol.dispose] !== "function")(
     "allows databases and prepared statements to collect after disposal",
     () => {
-      expect(runRetentionScenario({ cleanup: "dispose" })).toEqual({
+      expect(runRetentionScenario("dispose")).toEqual({
         databaseCollected: true,
         statementsCollected: 2,
         statementCount: 2,
@@ -601,33 +557,32 @@ describe("kysely sync helpers", () => {
     run(db.insertInto("items").values({ id: 1, name: "Ada" }));
     expectRows(selectItems(), [{ id: 1, name: "Ada" }]);
 
-    const compileOnlyError = /compile-only Kysely facade/;
-    await expect(selectItems().execute()).rejects.toThrow(compileOnlyError);
-    await expect(db.insertInto("items").values({ id: 2, name: "Grace" }).execute()).rejects.toThrow(
-      compileOnlyError,
-    );
-    await expect(
-      db.transaction().execute(async (trx) => {
-        await trx.insertInto("items").values({ id: 3, name: "Lin" }).execute();
-      }),
-    ).rejects.toThrow(compileOnlyError);
-    await expectCompileOnlyRejection(db.startTransaction().execute());
-    await expectCompileOnlyRejection(consumeStream(selectItems().stream()));
-    await expectCompileOnlyRejection(selectItems().execute());
+    for (const execute of [
+      () => selectItems().execute(),
+      () => db.insertInto("items").values({ id: 2, name: "Grace" }).execute(),
+      () =>
+        db.transaction().execute(async (trx) => {
+          await trx.insertInto("items").values({ id: 3, name: "Lin" }).execute();
+        }),
+    ]) {
+      await expect(execute()).rejects.toThrow(/compile-only Kysely facade/);
+    }
+    for (const execute of [
+      () => db.startTransaction().execute(),
+      () => consumeStream(selectItems().stream()),
+      () => selectItems().execute(),
+    ]) {
+      await expectCompileOnlyRejection(execute());
+    }
 
     expectRows(db.selectFrom("items").select(["id", "name"]), [{ id: 1, name: "Ada" }]);
   });
 });
 
-function countPrepares(database: DatabaseSync): { calls: () => number } {
+function countPrepares(database: DatabaseSync): () => number {
   enableNodeSqliteKyselyStatementCache(database);
-  const originalPrepare = database.prepare.bind(database);
-  let calls = 0;
-  database.prepare = (sqlText, options) => {
-    calls += 1;
-    return originalPrepare(sqlText, options);
-  };
-  return { calls: () => calls };
+  const prepare = vi.spyOn(database, "prepare");
+  return () => prepare.mock.calls.length;
 }
 
 function captureError(operation: () => void): unknown {
@@ -639,9 +594,9 @@ function captureError(operation: () => void): unknown {
   throw new Error("expected operation to throw");
 }
 
-function runRetentionScenario(options: {
-  cleanup: "clear-and-close" | "close" | "dispose" | "drop";
-}): RetentionResult {
+function runRetentionScenario(
+  cleanupMode: "clear-and-close" | "close" | "dispose" | "drop",
+): RetentionResult {
   const moduleUrl = resolveRuntimeWorkerUrl(storageProcessTestEntrypoints.kyselySync);
   const cleanup = {
     "clear-and-close": `
@@ -651,7 +606,7 @@ function runRetentionScenario(options: {
     close: "database.close();",
     dispose: "database[Symbol.dispose]();",
     drop: "",
-  }[options.cleanup];
+  }[cleanupMode];
   const script = `
     import { DatabaseSync } from "node:sqlite";
     import {

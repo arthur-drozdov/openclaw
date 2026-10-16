@@ -136,16 +136,14 @@ describe.each([
   });
 });
 
-describe("resolveArchiveSourcePath", () => {
-  it.each([
-    ["archive not found", async () => "/tmp/does-not-exist-openclaw-archive.tgz"],
-    [
-      "unsupported archive",
-      async () => (await createFixtureFile("plugin.txt", "not-an-archive")).filePath,
-    ],
-  ] as const)("rejects %s", async (expected, resolvePath) => {
-    expectPackError(await resolveArchiveSourcePath(await resolvePath()), [expected]);
-  });
+it.each([
+  ["archive not found", async () => "/tmp/does-not-exist-openclaw-archive.tgz"],
+  [
+    "unsupported archive",
+    async () => (await createFixtureFile("plugin.txt", "not-an-archive")).filePath,
+  ],
+] as const)("resolveArchiveSourcePath rejects %s", async (expected, resolvePath) => {
+  expectPackError(await resolveArchiveSourcePath(await resolvePath()), [expected]);
 });
 
 describe("resolveNpmSpecMetadata", () => {
@@ -320,15 +318,13 @@ describe("packNpmSpecToArchive", () => {
   });
 });
 
-describe("resolveNpmPackArchiveMetadata", () => {
-  it("reads archive metadata from npm 12 pack output", async () => {
-    const { filePath: archivePath } = await createArchive("tar-bytes");
-    mockPackCommandResult({ stdout: JSON.stringify({ "openclaw-plugin": packEntry }) });
-    expect(await resolveNpmPackArchiveMetadata({ archivePath, timeoutMs: 1000 })).toEqual({
-      ok: true,
-      archivePath,
-      tarballName: packEntry.filename,
-      metadata: packMetadata,
-    });
+it("resolveNpmPackArchiveMetadata reads npm 12 pack output", async () => {
+  const { filePath: archivePath } = await createArchive("tar-bytes");
+  mockPackCommandResult({ stdout: JSON.stringify({ "openclaw-plugin": packEntry }) });
+  expect(await resolveNpmPackArchiveMetadata({ archivePath, timeoutMs: 1000 })).toEqual({
+    ok: true,
+    archivePath,
+    tarballName: packEntry.filename,
+    metadata: packMetadata,
   });
 });
