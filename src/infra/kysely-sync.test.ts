@@ -1,7 +1,7 @@
 // Covers the compile-only Kysely facade used by sync node:sqlite helpers.
 import { spawnSync } from "node:child_process";
 import { constants, DatabaseSync, StatementSync } from "node:sqlite";
-import { sql, type ColumnType, type Kysely } from "kysely";
+import { sql, type ColumnType, type Kysely, type Compilable } from "kysely";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withTestTimeout } from "../../test/helpers/promise.js";
 import { resolveTestNodeExecPath } from "../test-utils/node-process.js";
@@ -33,6 +33,17 @@ type SyncHelperTestDatabase = {
 describe("kysely sync helpers", () => {
   let database: DatabaseSync;
   let db: Kysely<SyncHelperTestDatabase>;
+
+  function expectRows<Row>(
+    query: Compilable<Row>,
+    rows: unknown,
+    times = 1,
+    connection = database,
+  ) {
+    for (let attempt = 0; attempt < times; attempt++) {
+      expect(executeSqliteQuerySync(connection, query).rows).toEqual(rows);
+    }
+  }
 
   beforeEach(() => {
     database = new DatabaseSync(":memory:");
@@ -101,7 +112,7 @@ describe("kysely sync helpers", () => {
 
     const pragma = { compile: () => sql`pragma user_version`.compile(db) };
 
-    expect(executeSqliteQuerySync(database, pragma).rows).toEqual([{ user_version: 42 }]);
+    expectRows(pragma, [{ user_version: 42 }]);
     expect([...iterateSqliteQuerySync(database, pragma)]).toEqual([{ user_version: 42 }]);
     expect(prepareSqliteQueryTakeFirstSync(database, () => pragma)(undefined)).toEqual({
       user_version: 42,
@@ -187,9 +198,10 @@ describe("kysely sync helpers", () => {
         ["absent"],
       ]) {
         const query = db.selectFrom("items").selectAll().orderBy("name");
-        expect(
-          executeSqliteQuerySync(database, query.where("name", "in", sqliteStringSet(names))).rows,
-        ).toEqual(executeSqliteQuerySync(database, query.where("name", "in", names)).rows);
+        expectRows(
+          query.where("name", "in", sqliteStringSet(names)),
+          executeSqliteQuerySync(database, query.where("name", "in", names)).rows,
+        );
       }
     },
   );
@@ -252,9 +264,7 @@ describe("kysely sync helpers", () => {
         { id: 2, name },
       ];
       expect(update(name)).toEqual(mode === "first" ? rows[0] : { rows });
-      expect(
-        executeSqliteQuerySync(database, db.selectFrom("items").selectAll().orderBy("id")).rows,
-      ).toEqual(rows);
+      expectRows(db.selectFrom("items").selectAll().orderBy("id"), rows);
     }
   });
 
@@ -299,18 +309,18 @@ describe("kysely sync helpers", () => {
         );
 
     for (let parameterCount = 1; parameterCount <= 128; parameterCount += 1) {
-      expect(executeSqliteQuerySync(database, variableSelect(parameterCount)).rows).toEqual([]);
-      expect(executeSqliteQuerySync(database, variableSelect(parameterCount)).rows).toEqual([]);
+      expectRows(variableSelect(parameterCount), []);
+      expectRows(variableSelect(parameterCount), []);
     }
     expect(prepares.calls()).toBe(256);
 
     for (let parameterCount = 65; parameterCount <= 128; parameterCount += 1) {
-      expect(executeSqliteQuerySync(database, variableSelect(parameterCount)).rows).toEqual([]);
+      expectRows(variableSelect(parameterCount), []);
     }
     expect(prepares.calls()).toBe(256);
 
     for (let parameterCount = 1; parameterCount <= 64; parameterCount += 1) {
-      expect(executeSqliteQuerySync(database, variableSelect(parameterCount)).rows).toEqual([]);
+      expectRows(variableSelect(parameterCount), []);
     }
     expect(prepares.calls()).toBe(320);
   });
@@ -323,7 +333,7 @@ describe("kysely sync helpers", () => {
       for (let parameterCount = 1; parameterCount <= 128; parameterCount += 1) {
         const ids = Array.from({ length: parameterCount }, (_, index) => index + 1);
         const select = db.selectFrom("items").selectAll().where("id", "not in", ids);
-        expect(executeSqliteQuerySync(database, select).rows).toEqual([]);
+        expectRows(select, []);
       }
     };
 
@@ -401,9 +411,7 @@ describe("kysely sync helpers", () => {
     const select = db.selectFrom("items").selectAll();
     const prepares = countPrepares(database);
 
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: 1, name: "Ada" }]);
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: 1, name: "Ada" }]);
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: 1, name: "Ada" }]);
+    expectRows(select, [{ id: 1, name: "Ada" }], 3);
     expect(prepares.calls()).toBe(2);
 
     database.setAuthorizer((actionCode, tableName) =>
@@ -411,13 +419,11 @@ describe("kysely sync helpers", () => {
         ? constants.SQLITE_IGNORE
         : constants.SQLITE_OK,
     );
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: null, name: null }]);
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: null, name: null }]);
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: null, name: null }]);
+    expectRows(select, [{ id: null, name: null }], 3);
     expect(prepares.calls()).toBe(5);
 
     database.setAuthorizer(null);
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: 1, name: "Ada" }]);
+    expectRows(select, [{ id: 1, name: "Ada" }]);
     expect(prepares.calls()).toBe(6);
   });
 
@@ -432,9 +438,7 @@ describe("kysely sync helpers", () => {
     let allow = true;
     database.setAuthorizer(() => (allow ? constants.SQLITE_OK : constants.SQLITE_DENY));
 
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: 1, name: "Ada" }]);
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: 1, name: "Ada" }]);
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: 1, name: "Ada" }]);
+    expectRows(select, [{ id: 1, name: "Ada" }], 3);
     expect(prepares.calls()).toBe(3);
 
     allow = false;
@@ -447,18 +451,14 @@ describe("kysely sync helpers", () => {
       db.selectNoFrom((eb) => eb.fn<number>("length", [eb.val(value)]).as("value"));
     const prepares = countPrepares(database);
 
-    expect(executeSqliteQuerySync(database, lengthOf("small")).rows).toEqual([{ value: 5 }]);
-    expect(executeSqliteQuerySync(database, lengthOf("small")).rows).toEqual([{ value: 5 }]);
-    expect(executeSqliteQuerySync(database, lengthOf("small")).rows).toEqual([{ value: 5 }]);
+    expectRows(lengthOf("small"), [{ value: 5 }], 3);
     expect(prepares.calls()).toBe(2);
 
     for (const oversized of ["x".repeat(64 * 1024 + 1), "漢".repeat(24 * 1024)]) {
       const before = prepares.calls();
-      expect(executeSqliteQuerySync(database, lengthOf(oversized)).rows).toEqual([
-        { value: oversized.length },
-      ]);
+      expectRows(lengthOf(oversized), [{ value: oversized.length }]);
       expect(prepares.calls()).toBe(before + 1);
-      expect(executeSqliteQuerySync(database, lengthOf("small")).rows).toEqual([{ value: 5 }]);
+      expectRows(lengthOf("small"), [{ value: 5 }]);
       expect(prepares.calls()).toBe(before + 1);
     }
 
@@ -467,8 +467,8 @@ describe("kysely sync helpers", () => {
         `1 /*${"x".repeat(64 * 1024)}*/`,
       );
     const oversizedSql = db.selectNoFrom(oversizedExpression.as("value"));
-    expect(executeSqliteQuerySync(database, oversizedSql).rows).toEqual([{ value: 1 }]);
-    expect(executeSqliteQuerySync(database, oversizedSql).rows).toEqual([{ value: 1 }]);
+    expectRows(oversizedSql, [{ value: 1 }]);
+    expectRows(oversizedSql, [{ value: 1 }]);
     expect(prepares.calls()).toBe(6);
   });
 
@@ -494,14 +494,12 @@ describe("kysely sync helpers", () => {
     const select = db.selectFrom("items").selectAll();
     const prepares = countPrepares(database);
 
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: 1, name: "Ada" }]);
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: 1, name: "Ada" }]);
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: 1, name: "Ada" }]);
+    expectRows(select, [{ id: 1, name: "Ada" }], 3);
     expect(prepares.calls()).toBe(2);
 
     database.deserialize(replacementBytes);
 
-    expect(executeSqliteQuerySync(database, select).rows).toEqual([{ id: 2, name: "Grace" }]);
+    expectRows(select, [{ id: 2, name: "Grace" }]);
     expect(prepares.calls()).toBe(3);
   });
 
@@ -536,13 +534,11 @@ describe("kysely sync helpers", () => {
       db.selectNoFrom((eb) => eb.fn<string>("json", [eb.val(value)]).as("value"));
     const prepares = countPrepares(database);
 
-    expect(executeSqliteQuerySync(database, jsonValue("{}")).rows).toEqual([{ value: "{}" }]);
-    expect(executeSqliteQuerySync(database, jsonValue("{}")).rows).toEqual([{ value: "{}" }]);
-    expect(executeSqliteQuerySync(database, jsonValue("{}")).rows).toEqual([{ value: "{}" }]);
+    expectRows(jsonValue("{}"), [{ value: "{}" }], 3);
     expect(prepares.calls()).toBe(2);
 
     expect(() => executeSqliteQuerySync(database, jsonValue("{"))).toThrow(/malformed JSON/iu);
-    expect(executeSqliteQuerySync(database, jsonValue("[]")).rows).toEqual([{ value: "[]" }]);
+    expectRows(jsonValue("[]"), [{ value: "[]" }]);
     expect(prepares.calls()).toBe(2);
   });
 
@@ -589,13 +585,11 @@ describe("kysely sync helpers", () => {
     const prepares = countPrepares(cached);
 
     try {
-      expect(executeSqliteQuerySync(cached, select).rows).toEqual([{ id: 1, name: "Ada" }]);
-      expect(executeSqliteQuerySync(cached, select).rows).toEqual([{ id: 1, name: "Ada" }]);
-      expect(executeSqliteQuerySync(cached, select).rows).toEqual([{ id: 1, name: "Ada" }]);
+      expectRows(select, [{ id: 1, name: "Ada" }], 3, cached);
       expect(prepares.calls()).toBe(2);
 
       expect(() => cached.close()).toThrow(closeError);
-      expect(executeSqliteQuerySync(cached, select).rows).toEqual([{ id: 1, name: "Ada" }]);
+      expectRows(select, [{ id: 1, name: "Ada" }], 1, cached);
       expect(prepares.calls()).toBe(3);
     } finally {
       clearNodeSqliteKyselyCacheForDatabase(cached);
@@ -634,9 +628,7 @@ describe("kysely sync helpers", () => {
     database.exec("create table items (id integer primary key, name text not null)");
 
     executeSqliteQuerySync(database, db.insertInto("items").values({ id: 1, name: "Ada" }));
-    expect(executeSqliteQuerySync(database, db.selectFrom("items").selectAll()).rows).toEqual([
-      { id: 1, name: "Ada" },
-    ]);
+    expectRows(db.selectFrom("items").selectAll(), [{ id: 1, name: "Ada" }]);
 
     const compileOnlyError = /compile-only Kysely facade/;
     await expect(db.selectFrom("items").selectAll().execute()).rejects.toThrow(compileOnlyError);
@@ -652,9 +644,7 @@ describe("kysely sync helpers", () => {
     await expectCompileOnlyRejection(consumeStream(db.selectFrom("items").selectAll().stream()));
     await expectCompileOnlyRejection(db.selectFrom("items").selectAll().execute());
 
-    expect(
-      executeSqliteQuerySync(database, db.selectFrom("items").select(["id", "name"])).rows,
-    ).toEqual([{ id: 1, name: "Ada" }]);
+    expectRows(db.selectFrom("items").select(["id", "name"]), [{ id: 1, name: "Ada" }]);
   });
 });
 

@@ -33,6 +33,23 @@ function createEnv(): NodeJS.ProcessEnv {
   return { OPENCLAW_STATE_DIR: tempDirs.make("openclaw-message-tool-outcome-") };
 }
 
+function outcomeInput(overrides: Partial<Parameters<typeof recordMessageToolRunOutcome>[0]>) {
+  return {
+    runId: "worker-boundary",
+    sessionKey: "agent:main:main",
+    agentId: "main",
+    provider: "openai",
+    model: "gpt-5.6-luna",
+    outcome: "mute" as const,
+    runStatus: "completed" as const,
+    occurredAt: 100,
+    ...overrides,
+  };
+}
+
+const recordOutcome = (overrides: Parameters<typeof outcomeInput>[0]) =>
+  recordMessageToolRunOutcome(outcomeInput(overrides));
+
 afterEach(async () => {
   vi.restoreAllMocks();
   await closeOpenClawAgentDatabasesAsync();
@@ -55,15 +72,9 @@ describe("message-tool run outcome store", () => {
         throw new Error("SQL ran on the caller");
       });
       try {
-        await recordMessageToolRunOutcome({
+        await recordOutcome({
           runId: "worker-boundary",
-          sessionKey: "agent:main:main",
-          agentId: "main",
-          provider: "openai",
-          model: "gpt-5.6-luna",
           outcome: "tool_delivered",
-          runStatus: "completed",
-          occurredAt: 100,
           storePath,
           env,
         });
@@ -88,15 +99,10 @@ describe("message-tool run outcome store", () => {
       ["run-mute", "mute", "completed"],
       ["run-error", "mute", "errored"],
     ] as const) {
-      await recordMessageToolRunOutcome({
+      await recordOutcome({
         runId,
-        sessionKey: "agent:main:main",
-        agentId: "main",
-        provider: "openai",
-        model: "gpt-5.6-luna",
         outcome,
         runStatus,
-        occurredAt: 100,
         env,
       });
     }
@@ -104,15 +110,9 @@ describe("message-tool run outcome store", () => {
     outcomeFault.enable();
     try {
       await expect(
-        recordMessageToolRunOutcome({
+        recordOutcome({
           runId: "refused",
-          sessionKey: "agent:main:main",
-          agentId: "main",
-          provider: "openai",
-          model: "gpt-5.6-luna",
-          outcome: "mute",
           runStatus: "errored",
-          occurredAt: 100,
           env,
         }),
       ).rejects.toMatchObject({ code: "ERR_SQLITE_ERROR", errcode: 1811 });
@@ -149,14 +149,9 @@ describe("message-tool run outcome store", () => {
       FROM rows;
     `);
 
-    await recordMessageToolRunOutcome({
+    await recordOutcome({
       runId: "newest",
-      sessionKey: "agent:main:main",
-      agentId: "main",
-      provider: "openai",
-      model: "gpt-5.6-luna",
       outcome: "tool_delivered",
-      runStatus: "completed",
       occurredAt: 20_000,
       env,
     });
@@ -181,21 +176,15 @@ describe("message-tool run outcome store", () => {
     const db = openOpenClawAgentDatabase(target).db;
     const gate = createDeferredCore();
     const ahead = runOpenClawAgentWriteAdmission(target, () => gate.promise);
-    const input = {
+    const input = outcomeInput({
       ...target,
       runId: "first",
-      sessionKey: "agent:main:main",
-      provider: "openai",
-      model: "gpt-5.6-luna",
-      outcome: "mute" as const,
-      runStatus: "completed" as const,
-      occurredAt: 100,
-    };
+    });
     const first = recordMessageToolRunOutcome(input);
     const between = runOpenClawAgentWriteAdmission(target, () =>
       db.prepare("SELECT run_id FROM message_tool_run_outcomes ORDER BY id").all(),
     );
-    const second = recordMessageToolRunOutcome({ ...input, runId: "second" });
+    const second = recordOutcome({ ...input, runId: "second" });
     input.runId = "mutated";
     input.sessionKey = "agent:main:changed";
     env.OPENCLAW_STATE_DIR = tempDirs.make("openclaw-message-tool-unselected-");
@@ -216,15 +205,10 @@ describe("message-tool run outcome store", () => {
     openOpenClawAgentDatabase(target);
     const gate = createDeferredCore();
     const ahead = runOpenClawAgentWriteAdmission(target, () => gate.promise);
-    const pending = recordMessageToolRunOutcome({
+    const pending = recordOutcome({
       ...target,
       runId: "closed",
-      sessionKey: "agent:main:main",
-      provider: "openai",
-      model: "gpt-5.6-luna",
-      outcome: "mute",
       runStatus: "aborted",
-      occurredAt: 100,
     });
     const refused = expect(pending).rejects.toThrow(/revoked|closed/);
     try {
@@ -241,15 +225,11 @@ describe("message-tool run outcome store", () => {
     const env = createEnv();
     const target = { agentId: "main", env };
     await expect(
-      recordMessageToolRunOutcome({
+      recordOutcome({
         ...target,
         runId: "private",
         sessionKey: "agent:main:dashboard:incognito-outcome",
-        provider: "openai",
-        model: "gpt-5.6-luna",
-        outcome: "mute",
         runStatus: "aborted",
-        occurredAt: 100,
       }),
     ).rejects.toThrow("incognito");
     const privateTarget = { ...target, path: resolveIncognitoOpenClawAgentSqlitePath(target) };
