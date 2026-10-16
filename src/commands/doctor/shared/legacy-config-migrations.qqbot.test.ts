@@ -24,36 +24,30 @@ describe("Tencent QQBot 2.0 config migrations", () => {
   it("keeps environment credentials private and approvals locked through later repairs", () => {
     vi.stubEnv("QQBOT_APP_ID", "environment-app");
     vi.stubEnv("QQBOT_CLIENT_SECRET", "placeholder");
-    try {
-      const { config, qqbot } = migrate({});
-      expect(qqbot).toEqual({ enabled: true, dmPolicy: "open", allowFrom: locked });
-      expect(JSON.stringify(config)).not.toContain("placeholder");
-      const repaired = maybeRepairOpenPolicyAllowFrom(config);
-      expect(repaired).toEqual({ config, changes: [] });
-      expect(maybeRepairOpenPolicyAllowFrom(repaired.config)).toEqual(repaired);
-      const schema = widenOfficialExternalChannelSecretSchema({
-        channelId: "qqbot",
-        schema: { type: "object", additionalProperties: true },
-      });
-      expect(
-        validateJsonSchemaValue({
-          cacheKey: "qqbot-doctor-order-regression",
-          schema: schema ?? {},
-          value: qqbot,
-        }).ok,
-      ).toBe(true);
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    const { config, qqbot } = migrate({});
+    expect(qqbot).toEqual({ enabled: true, dmPolicy: "open", allowFrom: locked });
+    expect(JSON.stringify(config)).not.toContain("placeholder");
+    const repaired = maybeRepairOpenPolicyAllowFrom(config);
+    expect(repaired).toEqual({ config, changes: [] });
+    expect(maybeRepairOpenPolicyAllowFrom(repaired.config)).toEqual(repaired);
+    const schema = widenOfficialExternalChannelSecretSchema({
+      channelId: "qqbot",
+      schema: { type: "object", additionalProperties: true },
+    });
+    const validation = validateJsonSchemaValue({
+      cacheKey: "qqbot-doctor-order-regression",
+      schema: schema ?? {},
+      value: qqbot,
+    });
+    expect(validation.ok).toBe(true);
   });
 
   it("allocates distinct file SecretRefs for root and colliding account aliases", () => {
-    const ref = (provider: string) => ({ source: "file", provider, id: "value" });
-    const provider = (name: string) => ({
-      source: "file",
-      path: `/run/secrets/${name}`,
-      mode: "singleValue",
-    });
+    const secrets = [
+      ["clientSecret", "qqbot-client-secret", "root"],
+      ["accounts.ops.clientSecret", "qqbot-ops-client-secret", "ops"],
+      ["accounts.Ops.clientSecret", "qqbot-ops-client-secret-2", "other"],
+    ] as const;
     const { config, qqbot } = migrateChannel({
       clientSecretFile: "/run/secrets/root",
       accounts: {
@@ -61,18 +55,16 @@ describe("Tencent QQBot 2.0 config migrations", () => {
         Ops: { clientSecretFile: "/run/secrets/other" },
       },
     });
-    expect(qqbot).toMatchObject({
-      clientSecret: ref("qqbot-client-secret"),
-      accounts: {
-        ops: { clientSecret: ref("qqbot-ops-client-secret") },
-        Ops: { clientSecret: ref("qqbot-ops-client-secret-2") },
-      },
-    });
-    expect(config).toHaveProperty("secrets.providers", {
-      "qqbot-client-secret": provider("root"),
-      "qqbot-ops-client-secret": provider("ops"),
-      "qqbot-ops-client-secret-2": provider("other"),
-    });
+    for (const [key, provider] of secrets) {
+      expect(qqbot).toHaveProperty(key, { source: "file", provider, id: "value" });
+    }
+    const providers = Object.fromEntries(
+      secrets.map(([, provider, name]) => [
+        provider,
+        { source: "file", path: `/run/secrets/${name}`, mode: "singleValue" },
+      ]),
+    );
+    expect(config).toHaveProperty("secrets.providers", providers);
     expect(JSON.stringify(config)).not.toContain("clientSecretFile");
   });
 
@@ -95,15 +87,34 @@ describe("Tencent QQBot 2.0 config migrations", () => {
     expect(JSON.stringify(config)).not.toContain("execApprovals");
   });
 
+  it("locks unrepresentable approvals while preserving a representable account fallback", () => {
+    const { config, qqbot } = migrateChannel({
+      allowFrom: ["*"],
+      execApprovals: { enabled: false, approvers: ["admin"] },
+      accounts: {
+        filtered: { execApprovals: { approvers: ["admin"], agentFilter: ["ops"] } },
+        fallback: { allowFrom: ["admin"], execApprovals: { enabled: "auto" } },
+      },
+    });
+    expect(qqbot).toMatchObject({
+      allowFrom: locked,
+      dmPolicy: "open",
+      accounts: {
+        filtered: { allowFrom: locked, dmPolicy: "open" },
+        fallback: { allowFrom: ["ADMIN"] },
+      },
+    });
+    expect(JSON.stringify(config)).not.toContain("execApprovals");
+  });
+
   it("reconciles command operators with each account without promoting chat-only users", () => {
+    const channel = {
+      allowFrom: ["operator", "chat-only"],
+      accounts: { denied: { dmPolicy: "allowlist", allowFrom: ["chat-only"] } },
+    };
     const raw = {
       commands: { allowFrom: { qqbot: ["operator"] } },
-      channels: {
-        qqbot: {
-          allowFrom: ["operator", "chat-only"],
-          accounts: { denied: { dmPolicy: "allowlist", allowFrom: ["chat-only"] } },
-        },
-      },
+      channels: { qqbot: channel },
     };
     const operatorRule = LEGACY_CONFIG_MIGRATIONS_QQBOT[0]?.legacyRules?.find((rule) =>
       rule.message.includes("commands.allowFrom approval operators"),
@@ -147,32 +158,10 @@ describe("Tencent QQBot 2.0 config migrations", () => {
   it("fails closed when integer keys prevent preserving the named default", () => {
     const { qqbot } = migrateChannel({
       defaultAccount: "ops",
-      accounts: {
-        "123": { appId: "numeric-app", allowFrom: ["NUMERIC"] },
-        ops: { appId: "ops-app", allowFrom: ["OPS"] },
-      },
+      accounts: { "123": {}, ops: {} },
     });
     expect(qqbot?.defaultAccount).toBe("ops");
     expect(Object.keys(getRecord(qqbot?.accounts) ?? {})).toEqual(["123", "ops"]);
-  });
-
-  it("locks unrepresentable approvals while preserving a representable account fallback", () => {
-    const { qqbot } = migrateChannel({
-      allowFrom: ["*"],
-      execApprovals: { enabled: false, approvers: ["admin"] },
-      accounts: {
-        filtered: { execApprovals: { approvers: ["admin"], agentFilter: ["ops"] } },
-        fallback: { allowFrom: ["admin"], execApprovals: { enabled: "auto" } },
-      },
-    });
-    expect(qqbot).toMatchObject({
-      allowFrom: locked,
-      dmPolicy: "open",
-      accounts: {
-        filtered: { allowFrom: locked, dmPolicy: "open" },
-        fallback: { allowFrom: ["ADMIN"] },
-      },
-    });
   });
 
   it("maps native streaming switches to their effective wire behavior", () => {

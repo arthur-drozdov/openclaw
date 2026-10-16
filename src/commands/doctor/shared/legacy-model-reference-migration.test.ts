@@ -4,22 +4,41 @@ import type { OpenClawConfigWithLegacyRoster } from "../../../config/legacy.rost
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { applyLegacyDoctorMigrations } from "./legacy-config-compat.js";
 import { normalizeCompatibilityConfigValues } from "./legacy-config-core-migrate.js";
-import { normalizeLegacyRuntimeModelRefs } from "./legacy-config-core-normalizers.js";
+import { normalizeLegacyRuntimeModelRefs as normalizeRefs } from "./legacy-config-core-normalizers.js";
 import { migrateLegacyConfig } from "./legacy-config-migrate.js";
 
-function defaults(
-  value: NonNullable<NonNullable<OpenClawConfig["agents"]>["defaults"]>,
-): OpenClawConfig {
-  return { agents: { defaults: value } };
-}
+type AgentDefaults = NonNullable<NonNullable<OpenClawConfig["agents"]>["defaults"]>;
+
+const defaults = (value: AgentDefaults): OpenClawConfig => ({ agents: { defaults: value } });
 
 function runtime(config: OpenClawConfig, provider: string, modelId: string, agentId?: string) {
   return resolveModelRuntimePolicy({ config, provider, modelId, agentId }).policy;
 }
 
+const audioModel = "gemini-3.1-pro-preview";
+
+function audio(preferredModel: string, provider = "google"): OpenClawConfig {
+  return {
+    tools: {
+      media: {
+        audio: { preferredModel },
+        models: [{ provider, model: audioModel, capabilities: ["audio"] }],
+      },
+    },
+  };
+}
+
+const migrate = (raw: unknown) => migrateLegacyConfig(raw, { sourceConfigBeforeMigrations: raw });
+const selection = (primary: string, ...fallbacks: string[]) => ({ primary, fallbacks });
+const mediaModels = (provider: string) => ({
+  image: `${provider}/image-model`,
+  video: `${provider}/video-model`,
+  music: `${provider}/music-model`,
+});
+
 function expectIdempotent(config: OpenClawConfigWithLegacyRoster) {
   const changes: string[] = [];
-  expect(normalizeLegacyRuntimeModelRefs(config, changes)).toEqual(config);
+  expect(normalizeRefs(config, changes)).toEqual(config);
   expect(changes).toEqual([]);
 }
 
@@ -30,12 +49,7 @@ describe("canonical model-reference migration", () => {
       const agent = {
         model: "openai/current-model",
         heartbeat: { model: "claude-cli/heartbeat-only", every: "2h" },
-        subagents: {
-          model: {
-            primary: "google-gemini-cli/subagent-only",
-            fallbacks: ["claude-cli/subagent-fallback"],
-          },
-        },
+        subagents: { model: selection("google-gemini-cli/subagent", "claude-cli/fallback") },
       };
       const config: OpenClawConfigWithLegacyRoster = {
         agents:
@@ -44,75 +58,40 @@ describe("canonical model-reference migration", () => {
             : { list: [{ id: "main", ...agent }] },
       };
 
-      const result = normalizeLegacyRuntimeModelRefs(config, []);
+      const result = normalizeRefs(config, []);
       const migrated = scope === "defaults" ? result.agents?.defaults : result.agents?.list?.[0];
 
       expect(migrated?.heartbeat).toEqual({ model: "anthropic/heartbeat-only", every: "2h" });
-      expect(migrated?.subagents?.model).toEqual({
-        primary: "google/subagent-only",
-        fallbacks: ["anthropic/subagent-fallback"],
-      });
+      expect(migrated?.subagents?.model).toEqual(
+        selection("google/subagent", "anthropic/fallback"),
+      );
       expect(migrated?.models).toEqual({
         "anthropic/heartbeat-only": { agentRuntime: { id: "claude-cli" } },
-        "google/subagent-only": { agentRuntime: { id: "google-gemini-cli" } },
-        "anthropic/subagent-fallback": { agentRuntime: { id: "claude-cli" } },
+        "google/subagent": { agentRuntime: { id: "google-gemini-cli" } },
+        "anthropic/fallback": { agentRuntime: { id: "claude-cli" } },
       });
       expect(runtime(result, "anthropic", "heartbeat-only", "main")?.id).toBe("claude-cli");
-      expect(runtime(result, "google", "subagent-only", "main")?.id).toBe("google-gemini-cli");
+      expect(runtime(result, "google", "subagent", "main")?.id).toBe("google-gemini-cli");
       expectIdempotent(result);
       expect(agent.heartbeat.model).toBe("claude-cli/heartbeat-only");
     },
   );
 
   it("migrates an identified legacy media provider/model pair together", () => {
-    const config: OpenClawConfig = {
-      tools: {
-        media: {
-          audio: { preferredModel: "google-gemini-cli/gemini-3.1-pro-preview" },
-          models: [
-            {
-              provider: "google-gemini-cli",
-              model: "gemini-3.1-pro-preview",
-              capabilities: ["audio"],
-            },
-          ],
-        },
-      },
-    };
-
-    const result = normalizeLegacyRuntimeModelRefs(config, []);
-
-    expect(result.tools?.media).toEqual({
-      audio: { preferredModel: "google/gemini-3.1-pro-preview" },
-      models: [{ provider: "google", model: "gemini-3.1-pro-preview", capabilities: ["audio"] }],
-    });
+    const config = audio(`google-gemini-cli/${audioModel}`, "google-gemini-cli");
+    const result = normalizeRefs(config, []);
+    expect(result.tools?.media).toEqual(audio(`google/${audioModel}`).tools?.media);
   });
 
   it("repairs a retired preferred audio model without discarding the preference", () => {
-    const raw = {
+    const result = migrate({
       plugins: { enabled: false },
-      tools: {
-        media: {
-          audio: { preferredModel: "google/gemini-3-pro-preview" },
-          models: [
-            { provider: "google", model: "gemini-3.1-pro-preview", capabilities: ["audio"] },
-          ],
-        },
-      },
-    };
-    const result = migrateLegacyConfig(raw, { sourceConfigBeforeMigrations: raw });
+      ...audio("google/gemini-3-pro-preview"),
+    });
 
-    expect(result.config?.tools?.media?.audio?.preferredModel).toBe(
-      "google/gemini-3.1-pro-preview",
-    );
+    expect(result.config?.tools?.media).toEqual(audio(`google/${audioModel}`).tools?.media);
     expect(result.partiallyValid).not.toBe(true);
-    expect(result.config?.tools?.media?.models).toEqual([
-      { provider: "google", model: "gemini-3.1-pro-preview", capabilities: ["audio"] },
-    ]);
-    const migrated = result.sourceConfig ?? result.config;
-    expect(
-      migrateLegacyConfig(migrated, { sourceConfigBeforeMigrations: migrated }).changes,
-    ).toEqual([]);
+    expect(migrate(result.sourceConfig ?? result.config).changes).toEqual([]);
   });
 
   it.each(["cli:fixture-transcriber", "custom/team/model@account"])(
@@ -123,7 +102,7 @@ describe("canonical model-reference migration", () => {
         agents: { defaults: { model: "google/gemini-3-pro-preview" } },
         tools: { media: { audio: { preferredModel } } },
       };
-      const result = migrateLegacyConfig(raw, { sourceConfigBeforeMigrations: raw });
+      const result = migrate(raw);
 
       expect(result.config?.tools?.media?.audio?.preferredModel).toBe(preferredModel);
       expect(result.config?.agents?.defaults?.model).toBe("google/gemini-3.1-pro-preview");
@@ -132,20 +111,16 @@ describe("canonical model-reference migration", () => {
 
   it("migrates mixed runtime fallbacks and preserves each runtime separately", () => {
     const config = defaults({
-      model: {
-        primary: "openai/current-model",
-        fallbacks: ["claude-cli/assistant-a", "google-gemini-cli/assistant-b"],
-      },
+      model: selection("openai/current", "claude-cli/a", "google-gemini-cli/b"),
     });
-    const result = normalizeLegacyRuntimeModelRefs(config, []);
+    const result = normalizeRefs(config, []);
 
-    expect(result.agents?.defaults?.model).toEqual({
-      primary: "openai/current-model",
-      fallbacks: ["anthropic/assistant-a", "google/assistant-b"],
-    });
+    expect(result.agents?.defaults?.model).toEqual(
+      selection("openai/current", "anthropic/a", "google/b"),
+    );
     expect(result.agents?.defaults?.models).toEqual({
-      "anthropic/assistant-a": { agentRuntime: { id: "claude-cli" } },
-      "google/assistant-b": { agentRuntime: { id: "google-gemini-cli" } },
+      "anthropic/a": { agentRuntime: { id: "claude-cli" } },
+      "google/b": { agentRuntime: { id: "google-gemini-cli" } },
     });
     expect(config.agents?.defaults?.models).toBeUndefined();
   });
@@ -166,7 +141,7 @@ describe("canonical model-reference migration", () => {
       },
     });
     const changes: string[] = [];
-    const result = normalizeLegacyRuntimeModelRefs(config, changes);
+    const result = normalizeRefs(config, changes);
 
     expect(result.agents?.defaults?.models).toEqual({
       "anthropic/assistant-a": {
@@ -181,34 +156,21 @@ describe("canonical model-reference migration", () => {
   });
 
   it("uses the same migration for image, video, and music model slots", () => {
-    const config = defaults({
-      mediaModels: {
-        image: "google-gemini-cli/image-model",
-        video: "google-gemini-cli/video-model",
-        music: "google-gemini-cli/music-model",
-      },
-    });
-
-    expect(normalizeLegacyRuntimeModelRefs(config, []).agents?.defaults?.mediaModels).toEqual({
-      image: "google/image-model",
-      video: "google/video-model",
-      music: "google/music-model",
-    });
+    const config = defaults({ mediaModels: mediaModels("google-gemini-cli") });
+    expect(normalizeRefs(config, []).agents?.defaults?.mediaModels).toEqual(mediaModels("google"));
   });
 
   it("removes blocked nested fields when legacy and canonical model entries collide", () => {
-    const config = JSON.parse(`{
-      "agents": {"defaults": {"models": {
-        "claude-cli/assistant-a": {
-          "params": {"maxTokens": 1200, "constructor": {"polluted": true}}
-        },
+    const config = defaults({
+      models: {
+        "claude-cli/assistant-a": { params: { maxTokens: 1200, constructor: { polluted: true } } },
         "anthropic/assistant-a": {
-          "params": {"temperature": 0.8, "__proto__": {"polluted": true}}
-        }
-      }}}
-    }`);
+          params: { temperature: 0.8, ["__proto__"]: { polluted: true } },
+        },
+      },
+    });
 
-    expect(normalizeLegacyRuntimeModelRefs(config, []).agents?.defaults?.models).toEqual({
+    expect(normalizeRefs(config, []).agents?.defaults?.models).toEqual({
       "anthropic/assistant-a": {
         params: { temperature: 0.8, maxTokens: 1200 },
         agentRuntime: { id: "claude-cli" },
@@ -220,18 +182,14 @@ describe("canonical model-reference migration", () => {
   it("canonicalizes a seeded legacy Claude CLI allowlist in one doctor pass", () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "");
     vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "");
-    // Reporter path (#124952): the doctor spec migration copies an unmarked legacy
-    // model map into modelPolicy.allow first, so the normalizer must rewrite the
-    // allowlist and the model map in the same pass, not on a later run.
+    // #124952: the seeded allowlist and its model map must migrate in one pass.
     const raw = defaults({
       model: { primary: "anthropic/claude-opus-4-7" },
       models: { "claude-cli/claude-opus-4-7": {}, "claude-cli/claude-sonnet-4-6": {} },
     });
     const seeded = applyLegacyDoctorMigrations(raw, { sourceConfigBeforeMigrations: raw });
-    expect(seeded.next?.agents).toMatchObject({
-      defaults: {
-        modelPolicy: { allow: ["claude-cli/claude-opus-4-7", "claude-cli/claude-sonnet-4-6"] },
-      },
+    expect(seeded.next?.agents?.defaults?.modelPolicy).toMatchObject({
+      allow: ["claude-cli/claude-opus-4-7", "claude-cli/claude-sonnet-4-6"],
     });
 
     const res = normalizeCompatibilityConfigValues(seeded.next);

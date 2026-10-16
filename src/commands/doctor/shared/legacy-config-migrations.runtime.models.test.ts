@@ -1,17 +1,17 @@
 import { expectDefined } from "@openclaw/normalization-core";
-import { describe, it, expect } from "vitest";
+import { it, expect } from "vitest";
 import { createModelVisibilityPolicy } from "../../../agents/model-visibility-policy.js";
 import { findLegacyConfigIssues } from "../../../config/legacy.js";
 import type { OpenClawConfig } from "../../../config/types.js";
 import { validateConfigObjectRaw } from "../../../config/validation-core.js";
 import {
   collectBlockedLegacyOpenAICodexProviderPlan,
-  LEGACY_CONFIG_MIGRATIONS_RUNTIME_MODELS,
+  LEGACY_CONFIG_MIGRATIONS_RUNTIME_MODELS as migrations,
 } from "./legacy-config-migrations.runtime.models.js";
 
 function migration(id: string) {
   return expectDefined(
-    LEGACY_CONFIG_MIGRATIONS_RUNTIME_MODELS.find((entry) => entry.id === id),
+    migrations.find((entry) => entry.id === id),
     id,
   );
 }
@@ -28,8 +28,16 @@ function expectUnchanged(migrate: ReturnType<typeof migration>, raw: Record<stri
   expect(raw).toEqual(original);
 }
 
-function providerConfig(providers: Record<string, unknown>) {
+function providerConfig<T>(providers: T) {
   return { models: { providers } };
+}
+
+function route(api: string, baseUrl: string, id: string, compat: Record<string, unknown>) {
+  return { api, baseUrl, models: [{ id, compat }] };
+}
+
+function allowConfig(models: Record<string, unknown>, modelPolicy?: { allow: string[] }) {
+  return { agents: { defaults: { models, ...(modelPolicy ? { modelPolicy } : {}) } } };
 }
 
 it("detects owned vLLM aliases", () => {
@@ -50,175 +58,133 @@ it("retires pricing while preserving the hosted catalog config", () => {
   expect(raw.models).toEqual({ catalogRefresh: { enabled: true } });
 });
 
-describe("model compat catalog ownership", () => {
-  const migrate = migration("models.providers.*.models.*.compat->provider-catalog");
-  it("strips matching and dead overrides while preserving divergences", () => {
-    const anthropic = {
-      id: "claude-haiku-4-5",
-      compat: { codeMode: "capable", supportsTemperature: true },
-    };
-    const openai = {
-      id: "gpt-5.6-sol",
-      compat: {
-        supportsReasoningEffort: true,
-        supportsTemperature: true,
-        nativeWebSearchTool: true,
-        requiresMistralToolIds: true,
-      },
-    };
-    const raw = providerConfig({
-      anthropic: {
-        api: "anthropic-messages",
-        baseUrl: "https://api.anthropic.com/v1",
-        models: [anthropic],
-      },
-      openai: { api: "openai-responses", baseUrl: "https://api.openai.com/v1", models: [openai] },
-    });
-    const detect = () =>
-      migrate.legacyRules?.map((rule) => rule.match?.(raw.models.providers, raw));
-    expect(detect()).toEqual([true, true, true]);
-    migrate.apply(raw, []);
-    expect(anthropic.compat).toEqual({ supportsTemperature: true });
-    expect(openai.compat).toEqual({ supportsTemperature: true });
-    expect(detect()).toEqual([false, false, true]);
+const compatMigration = migration("models.providers.*.models.*.compat->provider-catalog");
+it("strips matching and dead compat overrides while preserving divergences", () => {
+  const raw = providerConfig({
+    anthropic: route("anthropic-messages", "https://api.anthropic.com/v1", "claude-haiku-4-5", {
+      codeMode: "capable",
+      supportsTemperature: true,
+    }),
+    openai: route("openai-responses", "https://api.openai.com/v1", "gpt-5.6-sol", {
+      supportsReasoningEffort: true,
+      supportsTemperature: true,
+      nativeWebSearchTool: true,
+      requiresMistralToolIds: true,
+    }),
   });
-
-  it("preserves live compat for custom models and routes", () => {
-    const raw = providerConfig({
-      anthropic: {
-        api: "anthropic-messages",
-        baseUrl: "http://127.0.0.1:9200/v1",
-        models: [{ id: "claude-haiku-4-5", compat: { codeMode: "capable" } }],
-      },
-      custom: {
-        api: "openai-completions",
-        baseUrl: "http://127.0.0.1:9000/v1",
-        models: [{ id: "local-model", compat: { supportsTools: false } }],
-      },
-      openai: {
-        api: "openai-responses",
-        baseUrl: "http://127.0.0.1:9100/v1",
-        models: [{ id: "gpt-5.6", compat: { supportsReasoningEffort: true } }],
-      },
-    });
-    expectUnchanged(migrate, raw);
-  });
+  const detect = () =>
+    compatMigration.legacyRules?.map((rule) => rule.match?.(raw.models.providers, raw));
+  expect(detect()).toEqual([true, true, true]);
+  compatMigration.apply(raw, []);
+  const { anthropic, openai } = raw.models.providers;
+  expect(anthropic.models[0]?.compat).toEqual({ supportsTemperature: true });
+  expect(openai.models[0]?.compat).toEqual({ supportsTemperature: true });
+  expect(detect()).toEqual([false, false, true]);
 });
 
-describe("explicit model allow policy migration", () => {
-  const migrate = migration("agents.defaults.models->agents.defaults.modelPolicy.allow");
-  it("defers the entire mixed restriction without opening model access", () => {
-    const raw: OpenClawConfig = {
-      agents: {
-        defaults: { models: { bare: {}, "demo/*": {} } },
-        ownership: "explicit",
-        entries: {
-          first: { models: { "first/bare": {} } },
-          second: { models: { "second/bare": {} } },
-        },
-      },
-    };
-    const original = structuredClone(raw);
-    expect(apply(migrate, raw)).toEqual([]);
-    expect(validateConfigObjectRaw(raw).ok).toBe(true);
-    expect(raw).toEqual(original);
-    expect(migrate.legacyRules?.[1]?.match?.(raw.agents?.defaults?.models, raw)).toBe(true);
-    for (const agentId of ["first", "second"]) {
-      const policy = createModelVisibilityPolicy({
-        cfg: raw,
-        catalog: [],
-        defaultProvider: "default",
-        agentId,
-      });
-      expect(policy.allowAny).toBe(false);
-      expect(policy.allows({ provider: agentId, model: "bare" })).toBe(true);
-      expect(policy.allows({ provider: "unrelated", model: "denied" })).toBe(false);
-    }
+it("preserves live compat for custom models and routes", () => {
+  const raw = providerConfig({
+    anthropic: route("anthropic-messages", "http://127.0.0.1:9200/v1", "claude-haiku-4-5", {
+      codeMode: "capable",
+    }),
+    custom: route("openai-completions", "http://127.0.0.1:9000/v1", "local-model", {
+      supportsTools: false,
+    }),
+    openai: route("openai-responses", "http://127.0.0.1:9100/v1", "gpt-5.6", {
+      supportsReasoningEffort: true,
+    }),
   });
+  expectUnchanged(compatMigration, raw);
+});
 
-  it("preserves the restriction after a new-version write and does not overwrite later policy edits", () => {
-    const raw = {
-      meta: { lastTouchedVersion: "2026.7.2" },
-      agents: {
-        defaults: {
-          models: { "openai/*": {}, "anthropic/claude-sonnet-4-6": { alias: "sonnet" } },
-        },
+const allowMigration = migration("agents.defaults.models->agents.defaults.modelPolicy.allow");
+it("defers the entire mixed restriction without opening model access", () => {
+  const raw: OpenClawConfig = {
+    agents: {
+      defaults: { models: { bare: {}, "demo/*": {} } },
+      ownership: "explicit",
+      entries: {
+        first: { models: { "first/bare": {} } },
+        second: { models: { "second/bare": {} } },
       },
-    };
-    expect(migrate.legacyRules?.[0]?.match?.(raw.agents.defaults.models, raw)).toBe(true);
-    expect(apply(migrate, raw)).toHaveLength(1);
-    expect(raw).toMatchObject({
-      agents: { defaults: { modelPolicy: { allow: ["openai/*", "anthropic/claude-sonnet-4-6"] } } },
-      meta: { migrations: { modelPolicyAllowlist: true } },
+    },
+  };
+  expectUnchanged(allowMigration, raw);
+  expect(validateConfigObjectRaw(raw).ok).toBe(true);
+  expect(allowMigration.legacyRules?.[1]?.match?.(raw.agents?.defaults?.models, raw)).toBe(true);
+  for (const agentId of ["first", "second"]) {
+    const policy = createModelVisibilityPolicy({
+      cfg: raw,
+      catalog: [],
+      defaultProvider: "default",
+      agentId,
     });
-    expect(migrate.legacyRules?.[0]?.match?.(raw.agents.defaults.models, raw)).toBe(false);
-    Object.assign(raw.agents.defaults, { modelPolicy: { allow: ["google/*"] } });
-    expect(apply(migrate, raw)).toEqual([]);
-    expect(raw).toHaveProperty("agents.defaults.modelPolicy.allow", ["google/*"]);
-  });
+    expect(policy.allowAny).toBe(false);
+    expect(policy.allows({ provider: agentId, model: "bare" })).toBe(true);
+    expect(policy.allows({ provider: "unrelated", model: "denied" })).toBe(false);
+  }
+});
 
-  it("leaves an explicit allowlist untouched", () => {
-    const raw = {
-      agents: {
-        defaults: { models: { "openai/gpt-5.5": {} }, modelPolicy: { allow: ["anthropic/*"] } },
-      },
-    };
-    expectUnchanged(migrate, raw);
+it("preserves the restriction after a new-version write and does not overwrite later policy edits", () => {
+  const raw = {
+    meta: { lastTouchedVersion: "2026.7.2" },
+    ...allowConfig({ "openai/*": {}, "anthropic/claude-sonnet-4-6": { alias: "sonnet" } }),
+  };
+  expect(allowMigration.legacyRules?.[0]?.match?.(raw.agents.defaults.models, raw)).toBe(true);
+  expect(apply(allowMigration, raw)).toHaveLength(1);
+  expect(raw).toMatchObject({
+    agents: { defaults: { modelPolicy: { allow: ["openai/*", "anthropic/claude-sonnet-4-6"] } } },
+    meta: { migrations: { modelPolicyAllowlist: true } },
   });
+  expect(allowMigration.legacyRules?.[0]?.match?.(raw.agents.defaults.models, raw)).toBe(false);
+  Object.assign(raw.agents.defaults, { modelPolicy: { allow: ["google/*"] } });
+  expect(apply(allowMigration, raw)).toEqual([]);
+  expect(raw).toHaveProperty("agents.defaults.modelPolicy.allow", ["google/*"]);
+});
 
-  it("marks a blank-only map migrated without stamping an allowlist", () => {
-    const raw = { agents: { defaults: { models: { " ": {} } } } };
-    expect(apply(migrate, raw)).toHaveLength(1);
-    expect(raw.agents.defaults).not.toHaveProperty("modelPolicy");
-    expect(raw).toHaveProperty("meta.migrations.modelPolicyAllowlist", true);
-    expect(apply(migrate, raw)).toEqual([]);
-  });
+it("leaves an explicit allowlist untouched", () => {
+  const raw = allowConfig({ "openai/gpt-5.5": {} }, { allow: ["anthropic/*"] });
+  expectUnchanged(allowMigration, raw);
+});
+
+it("marks a blank-only map migrated without stamping an allowlist", () => {
+  const raw = allowConfig({ " ": {} });
+  expect(apply(allowMigration, raw)).toHaveLength(1);
+  expect(raw.agents.defaults).not.toHaveProperty("modelPolicy");
+  expect(raw).toHaveProperty("meta.migrations.modelPolicyAllowlist", true);
+  expect(apply(allowMigration, raw)).toEqual([]);
 });
 
 it("retains the legacy provider for a scoped wildcard", () => {
   const raw = {
     agents: { defaults: {}, list: [{ id: "worker", modelPolicy: { allow: ["codex/*"] } }] },
-    models: {
-      providers: {
-        codex: {
-          api: "openai-chatgpt-responses",
-          models: [{ id: "gpt-5.6-sol", name: "GPT 5.6 Sol" }],
-        },
+    ...providerConfig({
+      codex: {
+        api: "openai-chatgpt-responses",
+        models: [{ id: "gpt-5.6-sol", name: "GPT 5.6 Sol" }],
       },
-    },
+    }),
   };
-  expect(apply(migration("models.providers.codex-routes->models.providers.openai"), raw)).toEqual(
-    [],
-  );
-  expect(raw.models.providers).toHaveProperty("codex");
-  expect(raw.models.providers).not.toHaveProperty("openai");
+  expectUnchanged(migration("models.providers.codex-routes->models.providers.openai"), raw);
   const blocked = collectBlockedLegacyOpenAICodexProviderPlan(raw);
   expect(blocked.warning).toContain("agents.list[0].modelPolicy.allow.0");
   expect(blocked.warning).toContain("authorize unrelated OpenAI models");
 });
 
-describe("stale contextWindow migration", () => {
-  const migrate = migration("models.providers.*.models.*.contextWindow-stale");
-  it.each([
-    { provider: "deepseek", id: "deepseek-v4-flash", before: 200_000, after: 1_000_000 },
-    { provider: "deepseek", id: "deepseek/deepseek-v4-flash", before: 200_000, after: 1_000_000 },
-  ])(
-    "repairs only stale native-provider windows: $provider/$id ($before)",
-    ({ provider, id, before, after }) => {
-      const model = { id, contextWindow: before, maxTokens: 61_440 };
-      const raw = providerConfig({ [provider]: { models: [model] } });
-      expect(migrate.legacyRules?.[0]?.match?.(raw.models.providers, raw)).toBe(before !== after);
-      expect(apply(migrate, raw)).toHaveLength(before !== after ? 1 : 0);
-      expect(model).toEqual({ id, contextWindow: after, maxTokens: 61_440 });
-      expect(migrate.legacyRules?.[0]?.match?.(raw.models.providers, raw)).toBe(false);
-      expect(apply(migrate, raw)).toEqual([]);
-    },
-  );
-  it.each([{ models: "not-an-array" }, { models: [{ contextWindow: 200_000 }] }])(
-    "leaves malformed provider rows unchanged: %j",
-    (provider) => {
-      const raw = providerConfig({ deepseek: provider });
-      expectUnchanged(migrate, raw);
-    },
-  );
-});
+const windowMigration = migration("models.providers.*.models.*.contextWindow-stale");
+it.each(["deepseek-v4-flash", "deepseek/deepseek-v4-flash"])(
+  "repairs stale native-provider window: %s",
+  (id) => {
+    const model = { id, contextWindow: 200_000, maxTokens: 61_440 };
+    const raw = providerConfig({ deepseek: { models: [model] } });
+    expect(windowMigration.legacyRules?.[0]?.match?.(raw.models.providers, raw)).toBe(true);
+    expect(apply(windowMigration, raw)).toHaveLength(1);
+    expect(model).toEqual({ id, contextWindow: 1_000_000, maxTokens: 61_440 });
+    expect(windowMigration.legacyRules?.[0]?.match?.(raw.models.providers, raw)).toBe(false);
+    expect(apply(windowMigration, raw)).toEqual([]);
+  },
+);
+it.each([{ models: "not-an-array" }, { models: [{ contextWindow: 200_000 }] }])(
+  "leaves malformed provider rows unchanged: %j",
+  (provider) => expectUnchanged(windowMigration, providerConfig({ deepseek: provider })),
+);
