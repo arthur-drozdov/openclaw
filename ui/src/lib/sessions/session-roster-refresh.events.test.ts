@@ -15,6 +15,18 @@ import {
   sessionsResult,
 } from "./session-capability.test-support.ts";
 
+function changed(payload: Record<string, unknown>) {
+  return { type: "event" as const, event: "sessions.changed", payload };
+}
+
+function makeRow(id: string, updatedAt: number, fields: Partial<GatewaySessionRow> = {}) {
+  return session("main", updatedAt, { key: `agent:main:${id}`, sessionId: id, ...fields });
+}
+
+function snapshot(row: GatewaySessionRow) {
+  return { reason: "patch", sessionKey: row.key, session: row, ancestorSessions: [] };
+}
+
 describe("session roster event traffic", () => {
   it("keeps 200-row shared and personal windows current without periodic reads of held rows", async () => {
     vi.useFakeTimers();
@@ -269,12 +281,7 @@ describe("session roster event traffic", () => {
         const refresh = sessions.refreshList({ ...query, force: true });
         await vi.advanceTimersByTimeAsync(0);
         expect(request).toHaveBeenCalledTimes(bootReads + 1);
-        harness.publishEvent("sessions.changed", {
-          reason: "patch",
-          sessionKey: promoted.key,
-          session: promoted,
-          ancestorSessions: [],
-        });
+        harness.publishEvent("sessions.changed", snapshot(promoted));
         pending.resolve(page([incoming, ...held.slice(0, 199)]));
         await refresh;
         expect(request).toHaveBeenCalledTimes(bootReads + 1);
@@ -300,9 +307,7 @@ describe("session roster event traffic", () => {
 
   it("catches up a retained managed window after an event overlaps its reconnect read", async () => {
     vi.useFakeTimers();
-    const held = session("main", 1, {
-      key: "agent:main:archived",
-      sessionId: "archived",
+    const held = makeRow("archived", 1, {
       isMain: false,
       archived: true,
       label: "Previous connection",
@@ -337,11 +342,7 @@ describe("session roster event traffic", () => {
       harness.publish(true, nextClient);
       await vi.advanceTimersByTimeAsync(0);
       expect(managedReads).toHaveBeenCalledOnce();
-      harness.emitEvent({
-        type: "event",
-        event: "sessions.changed",
-        payload: { reason: "patch", sessionKey: held.key, session: updated, ancestorSessions: [] },
-      });
+      harness.emitEvent(changed(snapshot(updated)));
       stale.resolve(sessionsResult([held], 1));
       await vi.advanceTimersByTimeAsync(5_000);
       expect(sessions.listSnapshot(query).result?.sessions).toEqual([updated]);
@@ -357,28 +358,18 @@ describe("session roster event traffic", () => {
   it("keeps dock snapshots out of ordinary roster membership without repeated list reads", async () => {
     vi.useFakeTimers();
     const held = session("main", 1, { sessionId: "held" });
-    const dock = session("main", 2, {
-      key: "agent:main:board-agent",
-      sessionId: "board-agent",
-      isDock: true,
-    });
+    const dock = makeRow("board-agent", 2, { isDock: true });
     const request = vi.fn(async () => sessionsResult([held], 1));
     const harness = createGatewayHarness(createTestGatewayClient(request));
+
     const sessions = createTestSessionCapability(harness.gateway);
     try {
       await sessions.refresh({ agentId: "main", excludeDock: true, force: true });
-      harness.publishEvent("sessions.changed", {
-        reason: "patch",
-        sessionKey: dock.key,
-        session: dock,
-        ancestorSessions: [],
-      });
-      harness.publishEvent("sessions.changed", {
-        reason: "patch",
-        sessionKey: held.key,
-        session: { ...held, updatedAt: 3, label: "Updated title" },
-        ancestorSessions: [],
-      });
+      harness.publishEvent("sessions.changed", snapshot(dock));
+      harness.publishEvent(
+        "sessions.changed",
+        snapshot({ ...held, updatedAt: 3, label: "Updated title" }),
+      );
       await vi.advanceTimersByTimeAsync(5_000);
       expect(request).toHaveBeenCalledOnce();
       expect(sessions.state.result?.sessions).toEqual([
@@ -396,7 +387,7 @@ describe("session roster event traffic", () => {
       vi.useFakeTimers();
       const held = session("main", 1, { sessionId: "held" });
       const updated = { ...held, updatedAt: 2 };
-      const added = session("main", 3, { key: "agent:main:new", sessionId: "new" });
+      const added = makeRow("new", 3);
       let rows = [held];
       let fail = false;
       let reads = 0;
@@ -442,15 +433,11 @@ describe("session roster event traffic", () => {
     "refreshes related parent facts when lineage is recorded on the %s row",
     async (lineage) => {
       vi.useFakeTimers();
-      const parent = session("main", 10, {
-        key: "agent:main:parent",
-        sessionId: "parent",
+      const parent = makeRow("parent", 10, {
         hasActiveSubagentRun: true,
         ...(lineage === "parent" ? { childSessions: ["agent:main:child"] } : {}),
       });
-      const child = session("main", 20, {
-        key: "agent:main:child",
-        sessionId: "child",
+      const child = makeRow("child", 20, {
         hasActiveRun: true,
         ...(lineage === "child" ? { spawnedBy: parent.key } : {}),
       });
@@ -461,6 +448,7 @@ describe("session roster event traffic", () => {
         .mockResolvedValueOnce(sessionsResult([child, parent], 1))
         .mockResolvedValue(sessionsResult(finalRows, 2));
       const harness = createGatewayHarness(createTestGatewayClient(request));
+
       const sessions = createTestSessionCapability(harness.gateway);
       try {
         await sessions.refresh({ agentId: "main", force: true });
@@ -481,14 +469,14 @@ describe("session roster event traffic", () => {
       vi.useFakeTimers();
       const limited = change !== "create" && change !== "unknown-mutation";
       const entering = change === "enter" || !limited;
-      const held = session("main", change === "unpin" || change === "owner-prefix" ? 10 : 40, {
-        key: "agent:main:held",
-        sessionId: "held",
-        ...(change === "unpin" ? { pinned: true, pinnedAt: 5 } : {}),
-      });
-      const recent = session("main", 30, { key: "agent:main:recent", sessionId: "recent" });
-      const boundary = session("main", 20, { key: "agent:main:boundary", sessionId: "boundary" });
-      const incoming = session("main", 50, { key: "agent:main:incoming", sessionId: "incoming" });
+      const held = makeRow(
+        "held",
+        change === "unpin" || change === "owner-prefix" ? 10 : 40,
+        change === "unpin" ? { pinned: true, pinnedAt: 5 } : {},
+      );
+      const recent = makeRow("recent", 30);
+      const boundary = makeRow("boundary", 20);
+      const incoming = makeRow("incoming", 50);
       const next = entering
         ? incoming
         : {
@@ -516,6 +504,7 @@ describe("session roster event traffic", () => {
         .mockResolvedValueOnce(page(initialRows))
         .mockResolvedValue(page(finalRows));
       const gatewayHarness = createGatewayHarness(createTestGatewayClient(request));
+
       const sessions = createTestSessionCapability(gatewayHarness.gateway);
       try {
         await sessions.refresh({
@@ -734,16 +723,12 @@ describe("session roster event traffic", () => {
 
   it("keeps child windows on row events but refills when the Gateway retires an owner", async () => {
     vi.useFakeTimers();
-    const parent = session("main", 1, {
-      key: "agent:main:parent",
-      sessionId: "parent",
+    const parent = makeRow("parent", 1, {
       isMain: false,
       childOwnerSessionKeys: [],
       childSessions: ["agent:main:child"],
     });
-    const child = session("main", 1, {
-      key: "agent:main:child",
-      sessionId: "child",
+    const child = makeRow("child", 1, {
       isMain: false,
       parentSessionKey: parent.key,
       childOwnerSessionKeys: [parent.key],
@@ -793,14 +778,8 @@ describe("session roster event traffic", () => {
   });
   it("refreshes whole-roster owner counts when an unseen session changes below the sampled page", async () => {
     vi.useFakeTimers();
-    const sampled = session("main", 100, {
-      key: "agent:main:sampled",
-      sessionId: "sampled",
-      label: "Latest conversation",
-    });
-    const unseen = session("main", 10, {
-      key: "agent:main:unseen",
-      sessionId: "unseen",
+    const sampled = makeRow("sampled", 100, { label: "Latest conversation" });
+    const unseen = makeRow("unseen", 10, {
       label: "Older conversation",
       hasActiveRun: false,
       status: "done",
@@ -837,17 +816,13 @@ describe("session roster event traffic", () => {
       ].entries()) {
         running = index === 0 ? 1 : 0;
         open = index === 2 ? 7 : 8;
-        emitEvent({
-          type: "event",
-          event: "sessions.changed",
-          payload: {
-            sessionKey: unseen.key,
+        emitEvent(
+          changed({
+            ...snapshot({ ...unseen, ...fields, updatedAt: 11 + index }),
             agentId: "main",
             reason: "patch",
-            ancestorSessions: [],
-            session: { ...unseen, ...fields, updatedAt: 11 + index },
-          },
-        });
+          }),
+        );
         await vi.advanceTimersByTimeAsync(5_000);
         expect(summaryRequest).toHaveBeenCalledTimes(2 + index);
         expect(sessions.listSnapshot(query).result?.ownerSessionCounts).toEqual([
@@ -912,27 +887,21 @@ describe("session roster event traffic", () => {
       await sessions.refresh({ agentId: "main", force: true });
       for (let index = 0; index < 5; index += 1) {
         for (const held of [row, other]) {
-          emitEvent({
-            type: "event",
-            event: "sessions.changed",
-            payload: {
-              sessionKey: held.key,
+          emitEvent(
+            changed({
+              ...snapshot({ ...held, label: `Renamed ${index}`, updatedAt: index + 2 }),
               agentId: "main",
               reason: "patch",
-              ancestorSessions: [],
-              session: { ...held, label: `Renamed ${index}`, updatedAt: index + 2 },
-            },
-          });
+            }),
+          );
         }
         await vi.advanceTimersByTimeAsync(1_000);
       }
       await vi.advanceTimersByTimeAsync(54_999);
       expect(summaryRequest).toHaveBeenCalledOnce();
       running = 1;
-      emitEvent({
-        type: "event",
-        event: "sessions.changed",
-        payload: {
+      emitEvent(
+        changed({
           sessionKey: row.key,
           agentId: "main",
           reason: "agent.run.started",
@@ -946,8 +915,8 @@ describe("session roster event traffic", () => {
             status: "running",
             activeRunIds: ["new-run"],
           },
-        },
-      });
+        }),
+      );
       expect(summaryRequest).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(5_000);
       expect(summaryRequest).toHaveBeenCalledTimes(2);
@@ -959,17 +928,13 @@ describe("session roster event traffic", () => {
       // Descendant-only changes on a held conversation outside the facet page also change counts.
       for (const [index, hasActiveSubagentRun] of [true, false].entries()) {
         running = hasActiveSubagentRun ? 2 : 1;
-        emitEvent({
-          type: "event",
-          event: "sessions.changed",
-          payload: {
-            sessionKey: other.key,
+        emitEvent(
+          changed({
+            ...snapshot({ ...other, updatedAt: 100 + index, hasActiveSubagentRun }),
             agentId: "main",
             reason: "subagent",
-            ancestorSessions: [],
-            session: { ...other, updatedAt: 100 + index, hasActiveSubagentRun },
-          },
-        });
+          }),
+        );
         await vi.advanceTimersByTimeAsync(5_000);
         expect(summaryRequest).toHaveBeenCalledTimes(3 + index);
         expect(sessions.listSnapshot(query).result?.ownerSessionCounts).toEqual([

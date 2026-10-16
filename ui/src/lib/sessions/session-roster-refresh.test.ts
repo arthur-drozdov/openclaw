@@ -17,6 +17,46 @@ import {
 
 const requireRecord = createRequireRecord("object", "expected-label");
 
+function changed(payload: Record<string, unknown>) {
+  return { type: "event" as const, event: "sessions.changed", payload };
+}
+
+function message(payload: Record<string, unknown>) {
+  return { type: "event" as const, event: "session.message", payload };
+}
+
+function resultFor(agentId: string, ts: number) {
+  return sessionsResult([{ key: `agent:${agentId}:main`, kind: "direct", updatedAt: ts }], ts);
+}
+
+function queuedLists(lists: Record<string, ReturnType<typeof createDeferred<SessionsListResult>>>) {
+  const request = vi.fn(async (method: string, params?: { agentId?: string }) => {
+    expect(method).toBe("sessions.list");
+    const pending = params?.agentId ? lists[params.agentId] : undefined;
+    if (!pending) {
+      throw new Error(`Unexpected refresh: ${params?.agentId}`);
+    }
+    return pending.promise;
+  });
+  return {
+    ...createSessionCapabilityHarness(request as unknown as GatewayBrowserClient["request"]),
+    request,
+  };
+}
+
+function coordinated(request: Parameters<typeof createTestGatewayClient>[0]) {
+  const client = createTestGatewayClient(request);
+  const harness = createGatewayHarness(client);
+  const coordinator = createConnectionBootstrapCoordinator();
+  coordinator.synchronize({ client, connected: true });
+  const sessions = createSessionCapability(
+    harness.gateway,
+    { state: { selectedId: "main" }, subscribe: () => () => undefined },
+    { connectionBootstrap: coordinator },
+  );
+  return { ...harness, client, coordinator, sessions };
+}
+
 describe("session roster refresh", () => {
   it("reuses conditional sidebar rows while accepting fresh facets and query replacements", async () => {
     const row = {
@@ -119,7 +159,7 @@ describe("session roster refresh", () => {
       const initial = createDeferred<SessionsListResult>();
       let reads = 0;
       let subscriptions = 0;
-      const client = createTestGatewayClient(async (method) => {
+      const { client, publish, coordinator, sessions } = coordinated(async (method) => {
         if (method === "sessions.subscribe") {
           if (++subscriptions === 1 && recover) {
             throw new GatewayRequestError({
@@ -136,14 +176,6 @@ describe("session roster refresh", () => {
         }
         return ++reads === 1 ? initial.promise : sessionsResult([], reads);
       });
-      const { gateway, publish } = createGatewayHarness(client);
-      const coordinator = createConnectionBootstrapCoordinator();
-      coordinator.synchronize({ client, connected: true });
-      const sessions = createSessionCapability(
-        gateway,
-        { state: { selectedId: "main" }, subscribe: () => () => undefined },
-        { connectionBootstrap: coordinator },
-      );
       const explicit = sessions.refresh({ agentId: "main", force: true });
       try {
         publish(true);
@@ -213,21 +245,11 @@ describe("session roster refresh", () => {
         reads += 1;
         return reads === 2 ? slow.promise : result(reads);
       });
-      const client = createTestGatewayClient(request);
-      const { gateway, emitEvent } = createGatewayHarness(client);
-      const coordinator = createConnectionBootstrapCoordinator();
-      coordinator.synchronize({ client, connected: true });
-      const sessions = createSessionCapability(
-        gateway,
-        { state: { selectedId: "main" }, subscribe: () => () => undefined },
-        { connectionBootstrap: coordinator },
-      );
+      const { client, emitEvent, coordinator, sessions } = coordinated(request);
       const invalidate = () =>
-        emitEvent({
-          type: "event",
-          event: "sessions.changed",
-          payload: { sessionKey: key, key, agentId, reason: "patch", spawnedBy: parentKey },
-        });
+        emitEvent(
+          changed({ sessionKey: key, key, agentId, reason: "patch", spawnedBy: parentKey }),
+        );
       let current: SessionsListResult | null = null;
       let invalidatedDuringPublication = false;
       const observe = (next: { result: SessionsListResult | null }) => {
@@ -437,11 +459,7 @@ describe("session roster refresh", () => {
       await sessions.refresh({ ...scope, force: true });
       request.mockClear();
       for (const agentId of ["research", "main", undefined]) {
-        emitEvent({
-          type: "event",
-          event: "session.message",
-          payload: { sessionKey: "global", agentId, hasActiveRun: false, status: "done" },
-        });
+        emitEvent(message({ sessionKey: "global", agentId, hasActiveRun: false, status: "done" }));
         await vi.advanceTimersByTimeAsync(5_000);
         expect(request).toHaveBeenCalledTimes(agentId === "research" && scope.agentId ? 0 : 1);
         request.mockClear();
@@ -460,27 +478,9 @@ describe("session roster refresh", () => {
     async ({ weakOptions, outcome }) => {
       const workList = createDeferred<SessionsListResult>();
       const researchList = createDeferred<SessionsListResult>();
-      const workResult = sessionsResult(
-        [{ key: "agent:work:main", kind: "direct", updatedAt: 1 }],
-        1,
-      );
-      const researchResult = sessionsResult(
-        [{ key: "agent:research:main", kind: "direct", updatedAt: 2 }],
-        2,
-      );
-      const request = vi.fn(async (method: string, params?: { agentId?: string }) => {
-        expect(method).toBe("sessions.list");
-        if (params?.agentId === "work") {
-          return await workList.promise;
-        }
-        if (params?.agentId === "research") {
-          return await researchList.promise;
-        }
-        throw new Error(`Unexpected refresh: ${params?.agentId}`);
-      });
-      const { sessions } = createSessionCapabilityHarness(
-        request as unknown as GatewayBrowserClient["request"],
-      );
+      const workResult = resultFor("work", 1);
+      const researchResult = resultFor("research", 2);
+      const { request, sessions } = queuedLists({ work: workList, research: researchList });
       const observed: Array<{
         result: SessionsListResult | null;
         error: string | null;
@@ -573,23 +573,8 @@ describe("session roster refresh", () => {
     async ({ weakOptions }) => {
       const activeList = createDeferred<SessionsListResult>();
       const researchList = createDeferred<SessionsListResult>();
-      const researchResult = sessionsResult(
-        [{ key: "agent:research:main", kind: "direct", updatedAt: 2 }],
-        2,
-      );
-      const request = vi.fn(async (method: string, params?: { agentId?: string }) => {
-        expect(method).toBe("sessions.list");
-        if (params?.agentId === "work") {
-          return await activeList.promise;
-        }
-        if (params?.agentId === "research") {
-          return await researchList.promise;
-        }
-        throw new Error(`Unexpected refresh: ${params?.agentId}`);
-      });
-      const { sessions } = createSessionCapabilityHarness(
-        request as unknown as GatewayBrowserClient["request"],
-      );
+      const researchResult = resultFor("research", 2);
+      const { request, sessions } = queuedLists({ work: activeList, research: researchList });
       const active = sessions.refresh({ agentId: "work", force: true });
       const weak = sessions.refresh({
         agentId: "work",
@@ -623,33 +608,15 @@ describe("session roster refresh", () => {
   ])("coalesces queued foreground refreshes for $scenario", async ({ nextAgentId, superseded }) => {
     const initialList = createDeferred<SessionsListResult>();
     const replacementList = createDeferred<SessionsListResult>();
-    const initialResult = sessionsResult(
-      [{ key: "agent:initial:main", kind: "direct", updatedAt: 1 }],
-      1,
-    );
-    const writerResult = sessionsResult(
-      [{ key: "agent:writer:main", kind: "direct", updatedAt: 2 }],
-      2,
-    );
-    const researchResult = sessionsResult(
-      [{ key: "agent:research:main", kind: "direct", updatedAt: 3 }],
-      3,
-    );
+    const initialResult = resultFor("initial", 1);
+    const writerResult = resultFor("writer", 2);
+    const researchResult = resultFor("research", 3);
     const replacementResult = superseded ? researchResult : writerResult;
     const normalizedAgentId = nextAgentId.trim();
-    const request = vi.fn(async (method: string, params?: { agentId?: string }) => {
-      expect(method).toBe("sessions.list");
-      if (params?.agentId === "initial") {
-        return await initialList.promise;
-      }
-      if (params?.agentId === normalizedAgentId) {
-        return await replacementList.promise;
-      }
-      throw new Error(`Unexpected refresh: ${params?.agentId}`);
+    const { request, sessions } = queuedLists({
+      initial: initialList,
+      [normalizedAgentId]: replacementList,
     });
-    const { sessions } = createSessionCapabilityHarness(
-      request as unknown as GatewayBrowserClient["request"],
-    );
     const initial = sessions.refresh({ agentId: "initial", force: true });
     const writer = sessions.refresh({ agentId: "writer", force: true });
     const replacement = sessions.refresh({ agentId: nextAgentId, force: true });
@@ -681,22 +648,11 @@ describe("session roster refresh", () => {
     const initialList = createDeferred<SessionsListResult>();
     const coalescedList = createDeferred<SessionsListResult>();
     const laterList = createDeferred<SessionsListResult>();
-    const request = vi.fn(async (method: string, params?: { agentId?: string }) => {
-      expect(method).toBe("sessions.list");
-      switch (params?.agentId) {
-        case "initial":
-          return await initialList.promise;
-        case "coalesced":
-          return await coalescedList.promise;
-        case "later":
-          return await laterList.promise;
-        default:
-          throw new Error(`Unexpected refresh: ${params?.agentId}`);
-      }
+    const { request, sessions } = queuedLists({
+      initial: initialList,
+      coalesced: coalescedList,
+      later: laterList,
     });
-    const { sessions } = createSessionCapabilityHarness(
-      request as unknown as GatewayBrowserClient["request"],
-    );
     const initialSettled = vi.fn();
     const coalescedSettled = vi.fn();
     const initial = sessions.refresh({ agentId: "initial", force: true }).then(initialSettled);

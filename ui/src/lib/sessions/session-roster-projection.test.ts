@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionsListResult } from "../../api/types.ts";
 import {
   createGatewayRequestMock,
@@ -12,27 +12,37 @@ import {
 } from "./session-capability.test-support.ts";
 import type { SessionCapability } from "./session-capability.ts";
 
+const makeRow = (id: string, label: string) => ({
+  key: `agent:main:${id}`,
+  sessionId: id,
+  kind: "direct" as const,
+  label,
+  updatedAt: 1,
+});
+function makeHarness(result: (params?: unknown) => SessionsListResult) {
+  const request = createGatewayRequestMock(async (method, params) => {
+    if (method !== "sessions.list") {
+      throw new Error(`Unexpected request: ${method}`);
+    }
+    return result(params);
+  });
+  const client = createTestGatewayClient(request);
+  return { ...createSessionCapabilityHarness(client.request.bind(client)), request };
+}
+beforeEach(() => vi.useFakeTimers());
+afterEach(() => vi.useRealTimers());
+
 describe("event-driven session list refresh", () => {
   it("bounds held-roster enumeration while reconciling overlapping session views", async () => {
-    vi.useFakeTimers();
-    const rows = Array.from({ length: 10 }, (_, index) => ({
-      key: `agent:main:shared-${index}`,
-      sessionId: `shared-${index}`,
-      kind: "direct" as const,
-      label: `Shared ${index}`,
-      updatedAt: 1,
-    }));
-    const request = createGatewayRequestMock(async (method) => {
-      if (method !== "sessions.list") {
-        throw new Error(`Unexpected request: ${method}`);
-      }
-      return sessionsResult(
+    const rows = Array.from({ length: 10 }, (_, index) =>
+      makeRow(`shared-${index}`, `Shared ${index}`),
+    );
+    const { sessions, emitEvent, request } = makeHarness(() =>
+      sessionsResult(
         rows.map((row) => ({ ...row })),
         1,
-      );
-    });
-    const client = createTestGatewayClient(request);
-    const { sessions, emitEvent } = createSessionCapabilityHarness(client.request.bind(client));
+      ),
+    );
     const queries = Array.from({ length: 8 }, (_, index) => ({
       agentId: "main",
       search: "Shared",
@@ -42,20 +52,20 @@ describe("event-driven session list refresh", () => {
     const target = rows[0]!;
     const observed = vi.fn();
     let descriptor: ReturnType<SessionCapability["observeRow"]> | undefined;
+    const heldResults = () => [
+      sessions.state.result,
+      ...queries.map((query) => sessions.listSnapshot(query).result),
+    ];
+    const findTarget = (result: SessionsListResult | null | undefined) =>
+      result?.sessions.find((row) => row.key === target.key);
     const eventDelivered = vi.fn(() => ({
       descriptor: descriptor?.row,
-      rows: [
-        sessions.state.result,
-        ...queries.map((query) => sessions.listSnapshot(query).result),
-      ].map((result) => result?.sessions.find((row) => row.key === target.key)),
+      rows: heldResults().map(findTarget),
     }));
     let visitedRows = 0;
     const tracked = new WeakSet<SessionsListResult["sessions"]>();
     const trackHeldRows = () => {
-      const held = [
-        sessions.state.result,
-        ...queries.map((query) => sessions.listSnapshot(query).result),
-      ];
+      const held = heldResults();
       for (const result of held) {
         if (!result || tracked.has(result.sessions)) {
           continue;
@@ -101,10 +111,9 @@ describe("event-driven session list refresh", () => {
       // Allow per-view reduction and decoration; repeated whole-roster preparation is quadratic.
       expect(visitedRows).toBeLessThanOrEqual(heldRowCount * 12);
       expect(descriptor.row).toEqual(expected);
-      for (const query of queries) {
-        const result = sessions.listSnapshot(query).result;
+      for (const result of heldResults()) {
         expect(result?.sessions).toHaveLength(rows.length);
-        expect(result?.sessions.find((row) => row.key === target.key)).toEqual(expected);
+        expect(findTarget(result)).toEqual(expected);
       }
       expect(eventDelivered).toHaveBeenCalledExactlyOnceWith(
         event,
@@ -118,51 +127,28 @@ describe("event-driven session list refresh", () => {
         descriptor: expected,
         rows: Array.from({ length: queries.length + 1 }, () => expected),
       });
-      expect(sessions.state.result?.sessions.find((row) => row.key === target.key)).toEqual(
-        expected,
-      );
       expect(observed).toHaveBeenCalled();
       expect(request).toHaveBeenCalledTimes(queries.length + 1);
     } finally {
       descriptor?.dispose();
       unsubscribers.forEach((unsubscribe) => unsubscribe());
       sessions.dispose();
-      vi.useRealTimers();
     }
   });
 
   it("converges an unrelated row before managed listeners run through Gateway reconciliation", async () => {
-    vi.useFakeTimers();
-    const first = {
-      key: "agent:main:first",
-      sessionId: "first",
-      kind: "direct" as const,
-      label: "Shared first",
-      updatedAt: 1,
-    };
-    const second = {
-      key: "agent:main:second",
-      sessionId: "second",
-      kind: "direct" as const,
-      label: "Shared second",
-      lastMessagePreview: "Before",
-      updatedAt: 1,
-    };
+    const first = makeRow("first", "Shared first");
+    const second = { ...makeRow("second", "Shared second"), lastMessagePreview: "Before" };
     const olderQuery = { agentId: "main", search: "Shared", limit: 10 };
     const newerQuery = { agentId: "main", search: "Shared", limit: 11 };
     let fresh = false;
-    const request = createGatewayRequestMock(async (method, params) => {
-      if (method !== "sessions.list") {
-        throw new Error(`Unexpected request: ${method}`);
-      }
+    const { sessions, emitEvent, request } = makeHarness((params) => {
       const newer = fresh && asNullableRecord(params)?.limit === newerQuery.limit;
       return sessionsResult(
         [{ ...first }, { ...second, lastMessagePreview: newer ? "After" : "Before" }],
         1,
       );
     });
-    const client = createTestGatewayClient(request);
-    const { sessions, emitEvent } = createSessionCapabilityHarness(client.request.bind(client));
     let observe = false;
     const delivered: Array<{
       older: string | null | undefined;
@@ -177,10 +163,7 @@ describe("event-driven session list refresh", () => {
       }
     });
     const unsubscribeNewer = sessions.subscribeList(newerQuery, () => undefined);
-    try {
-      await sessions.refresh({ agentId: "main", force: true });
-      await sessions.refreshList({ ...olderQuery, force: true });
-      await sessions.refreshList({ ...newerQuery, force: true });
+    const emitPatch = (label: string, updatedAt: number) =>
       emitEvent({
         type: "event",
         event: "sessions.changed",
@@ -189,38 +172,35 @@ describe("event-driven session list refresh", () => {
           agentId: "main",
           reason: "patch",
           sessionId: first.sessionId,
-          label: first.label,
-          updatedAt: 1,
+          label,
+          updatedAt,
         },
       });
+    try {
+      await sessions.refresh({ agentId: "main", force: true });
+      await sessions.refreshList({ ...olderQuery, force: true });
+      await sessions.refreshList({ ...newerQuery, force: true });
+      emitPatch(first.label, 1);
       fresh = true;
       await sessions.refreshList({ ...newerQuery, force: true });
       expect(preview(olderQuery)).toBe("Before");
       expect(preview(newerQuery)).toBe("After");
       const beforeRequests = request.mock.calls.length;
       observe = true;
-      const payload = {
-        sessionKey: first.key,
-        agentId: "main",
-        reason: "patch",
-        sessionId: first.sessionId,
-        label: "Shared first updated",
-        updatedAt: 2,
-      };
-      emitEvent({ type: "event", event: "sessions.changed", payload });
+      const label = "Shared first updated";
+      emitPatch(label, 2);
       expect(delivered).toEqual([{ older: "After", newer: "After" }]);
       for (const query of [olderQuery, newerQuery]) {
         expect(sessions.listSnapshot(query).result?.sessions).toHaveLength(2);
         expect(
           sessions.listSnapshot(query).result?.sessions.find((row) => row.key === first.key)?.label,
-        ).toBe(payload.label);
+        ).toBe(label);
       }
       expect(request).toHaveBeenCalledTimes(beforeRequests);
     } finally {
       unsubscribeOlder();
       unsubscribeNewer();
       sessions.dispose();
-      vi.useRealTimers();
     }
   });
 });

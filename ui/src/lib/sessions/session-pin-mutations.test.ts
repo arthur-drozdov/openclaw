@@ -11,6 +11,35 @@ import {
 } from "./session-capability.test-support.ts";
 import type { SessionListSnapshot } from "./session-capability.ts";
 
+function pinRow(key: string, overrides: Partial<GatewaySessionRow> = {}): GatewaySessionRow {
+  return {
+    key,
+    sessionId: `${key}:session`,
+    kind: "direct",
+    updatedAt: 10,
+    pinned: false,
+    unread: true,
+    lastReadAt: 0,
+    lastActivityAt: 10,
+    ...overrides,
+  };
+}
+
+function ack(key: string, entry: Partial<GatewaySessionRow>) {
+  return { ok: true, path: "(multiple)", key, entry };
+}
+
+function patchPin(
+  sessions: ReturnType<typeof createTestSessionCapability>,
+  row: GatewaySessionRow,
+) {
+  return sessions.patch(
+    row.key,
+    { pinned: true, unread: false },
+    { agentId: "main", expectedSessionId: row.sessionId, deferListRefresh: true },
+  );
+}
+
 const SESSION_EVENT_REFRESH_DEBOUNCE_MS = 5_000;
 
 function rowPinned(result: SessionsListResult | null, key: string): boolean {
@@ -72,19 +101,12 @@ describe("session pin mutations", () => {
   it("preserves fresh row facts when deletion rolls back during a pin and read mutation", async () => {
     vi.useFakeTimers();
     const key = "agent:main:rollback-provenance";
-    const initial: GatewaySessionRow = {
-      key,
+    const initial = pinRow(key, {
       agentId: "main",
       sessionId: "rollback-provenance-session",
-      kind: "direct",
       archived: false,
-      updatedAt: 10,
-      pinned: false,
-      unread: true,
-      lastReadAt: 0,
-      lastActivityAt: 10,
       lastMessagePreview: "Before streaming output",
-    };
+    });
     const fresh = { ...initial, lastMessagePreview: "New streaming output" };
     let current = initial;
     const patchReply = createDeferred<unknown>();
@@ -118,15 +140,7 @@ describe("session pin mutations", () => {
     const pending: Promise<unknown>[] = [];
     try {
       await sessions.refresh({ agentId: "main", force: true, includeLastMessage: true });
-      const patching = sessions.patch(
-        key,
-        { pinned: true, unread: false },
-        {
-          agentId: "main",
-          expectedSessionId: initial.sessionId,
-          deferListRefresh: true,
-        },
-      );
+      const patching = patchPin(sessions, initial);
       pending.push(patching);
       await patchDispatched.promise;
       const reconcile = sessions.captureReconcile();
@@ -159,18 +173,15 @@ describe("session pin mutations", () => {
       expect(sessions.state.result?.sessions).toEqual([
         expect.objectContaining({ ...fresh, pinned: true, unread: false }),
       ]);
-      patchReply.resolve({
-        ok: true,
-        path: "(multiple)",
-        key,
-        entry: {
+      patchReply.resolve(
+        ack(key, {
           sessionId: initial.sessionId,
           updatedAt: 20,
           pinnedAt: 20,
           lastReadAt: 20,
           lastActivityAt: 10,
-        },
-      });
+        }),
+      );
       await expect(patching).resolves.toBeTruthy();
       expect(sessions.state.result?.sessions[0]?.lastMessagePreview).toBe(fresh.lastMessagePreview);
       expect(unexpectedMethods).toEqual([]);
@@ -179,12 +190,7 @@ describe("session pin mutations", () => {
         sessions.dispose();
         describeReply.resolve({ session: initial });
         deleteReply.resolve({ deleted: false });
-        patchReply.resolve({
-          ok: true,
-          path: "(multiple)",
-          key,
-          entry: { sessionId: initial.sessionId },
-        });
+        patchReply.resolve(ack(key, { sessionId: initial.sessionId }));
         await Promise.allSettled(pending);
       } finally {
         vi.useRealTimers();
@@ -194,16 +200,7 @@ describe("session pin mutations", () => {
 
   it("keeps acknowledged pin and read fields when an earlier describe finishes", async () => {
     const key = "agent:main:acknowledged-fields";
-    const initial: GatewaySessionRow = {
-      key,
-      sessionId: "acknowledged-fields",
-      kind: "direct",
-      updatedAt: 10,
-      pinned: false,
-      unread: true,
-      lastReadAt: 0,
-      lastActivityAt: 10,
-    };
+    const initial = pinRow(key, { sessionId: "acknowledged-fields" });
     let current = initial;
     const delayed = createDeferred<{ session: GatewaySessionRow }>();
     const client = createTestGatewayClient(async (method) => {
@@ -222,18 +219,13 @@ describe("session pin mutations", () => {
           unread: false,
           lastReadAt: 20,
         };
-        return {
-          ok: true,
-          path: "(multiple)",
-          key,
-          entry: {
-            sessionId: initial.sessionId,
-            updatedAt: 20,
-            pinnedAt: 20,
-            lastReadAt: 20,
-            lastActivityAt: 10,
-          },
-        };
+        return ack(key, {
+          sessionId: initial.sessionId,
+          updatedAt: 20,
+          pinnedAt: 20,
+          lastReadAt: 20,
+          lastActivityAt: 10,
+        });
       }
       throw new Error(`Unexpected Gateway method: ${method}`);
     });
@@ -243,15 +235,7 @@ describe("session pin mutations", () => {
       await sessions.refresh({ force: true, agentId: "main" });
       const reconcile = sessions.captureReconcile();
       reading = client.request<{ session: GatewaySessionRow }>("sessions.describe", { key });
-      await sessions.patch(
-        key,
-        { pinned: true, unread: false },
-        {
-          agentId: "main",
-          expectedSessionId: initial.sessionId,
-          deferListRefresh: true,
-        },
-      );
+      await patchPin(sessions, initial);
       const confirmed = { pinned: true, pinnedAt: 20, unread: false, lastReadAt: 20 };
       expect(sessions.state.result?.sessions[0]).toMatchObject(confirmed);
       delayed.resolve({ session: initial });
