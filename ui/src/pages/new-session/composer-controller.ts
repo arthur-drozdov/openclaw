@@ -6,8 +6,8 @@ import {
   observeTextareaOverflow,
   scheduleTextareaHeightAdjustment,
 } from "../chat/components/chat-composer-dom.ts";
-import { ComposerEmojiMenu } from "../chat/components/chat-composer-emoji.tsx";
-import { HumanMentionMenu } from "../chat/components/chat-composer-mention-menu.tsx";
+import { createComposerEmojiMenu } from "../chat/components/chat-composer-emoji.tsx";
+import { createHumanMentionMenu } from "../chat/components/chat-composer-mention-menu.tsx";
 import type { ChatComposerPlusMenuView } from "../chat/components/chat-composer-plus-menu.types.ts";
 import { createSkillMenu } from "../chat/components/chat-composer-skill-menu.tsx";
 import { createSlashMenu } from "../chat/components/chat-composer-slash-menu.tsx";
@@ -27,8 +27,8 @@ export function createNewSessionComposerTextarea() {
     critterVisit: Math.random(),
     skillMenu: createSkillMenu(),
     slashMenu: createSlashMenu(),
-    mentionMenu: new HumanMentionMenu(),
-    emojiMenu: new ComposerEmojiMenu(),
+    mentionMenu: createHumanMentionMenu(),
+    emojiMenu: createComposerEmojiMenu(),
     composing: false,
     // SAFETY: Beforeinput fills this optional selection snapshot.
     mentionInput: undefined as HumanMentionInput | undefined,
@@ -138,7 +138,7 @@ export function createNewSessionComposerTextarea() {
     disconnect() {
       control.skillMenu.dispose();
       control.slashMenu.dispose();
-      control.emojiMenu.close();
+      control.emojiMenu.dispose();
       control.composing = false;
       control.mentionMenu.dispose();
       skillCommandClient = null;

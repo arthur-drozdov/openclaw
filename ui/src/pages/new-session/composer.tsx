@@ -108,15 +108,11 @@ function prepareNewSessionComposer(options: NewSessionComposerOptions) {
   const gateway = context?.gateway;
   const commandClient = options.nativeTerminal ? null : (gateway?.snapshot.client ?? null);
   const mentionDirectory = resolveNewSessionMentionDirectory(options);
-  const skillMenu = options.textareaController.skillMenu;
+  const { skillMenu, slashMenu, mentionMenu, emojiMenu } = textareaController;
   const skillMenuState = skillMenu.state;
-  const slashMenu = options.textareaController.slashMenu;
   const slashMenuState = slashMenu.state;
-  const mentionMenu = options.textareaController.mentionMenu;
-  const emojiMenu = options.textareaController.emojiMenu;
   const composerLocked =
     options.submitting || options.messageLocked === true || options.dictationActive === true;
-  mentionMenu.syncDirectory(composerLocked ? undefined : mentionDirectory);
   const skillMenuHost: SkillMenuHost = {
     paneId: "new-session",
     getDraft: () => options.textareaController.getTextarea()?.value ?? options.message,
@@ -161,12 +157,8 @@ function prepareNewSessionComposer(options: NewSessionComposerOptions) {
       return;
     }
     if (
-      options.textareaController.emojiMenu.handleKeydown(event, "new-session", options.onChange) ||
-      options.textareaController.mentionMenu.handleKeydown(
-        event,
-        mentionMenuHost,
-        options.onChange,
-      ) ||
+      options.textareaController.emojiMenu.handleKeydown(event, "new-session") ||
+      options.textareaController.mentionMenu.handleKeydown(event, mentionMenuHost) ||
       skillMenu.handleKeydown(event, skillMenuHost) ||
       slashMenu.handleKeydown(event, slashMenuHost)
     ) {
@@ -206,7 +198,6 @@ function prepareNewSessionComposer(options: NewSessionComposerOptions) {
   ) => {
     emojiMenu.update(
       target,
-      options.onChange,
       !composerLocked &&
         !options.nativeTerminal &&
         !options.textareaController.composing &&
@@ -226,7 +217,6 @@ function prepareNewSessionComposer(options: NewSessionComposerOptions) {
     } else {
       mentionMenu.update(
         target,
-        options.onChange,
         !event
           ? "selection"
           : event.inputType === "insertText" && event.data?.includes("@") === true
@@ -240,16 +230,13 @@ function prepareNewSessionComposer(options: NewSessionComposerOptions) {
     const target = event.currentTarget;
     if (target instanceof HTMLTextAreaElement) {
       if (event.type === "keyup") {
-        mentionMenu.update(target, options.onChange);
+        mentionMenu.update(target);
         updateEmojiMenu(target);
       } else {
         updateMenus(target);
       }
     }
   };
-  if (composerLocked || options.nativeTerminal || options.textareaController.composing) {
-    emojiMenu.close();
-  }
   const attachmentProps = {
     attachmentReads: attachmentDraft.reads,
     attachmentLimits: resolveChatAttachmentLimits(gateway?.snapshot.hello?.policy),
@@ -302,14 +289,14 @@ function prepareNewSessionComposer(options: NewSessionComposerOptions) {
   const ordinaryShortcut = options.requiresModifier
     ? "Control+Enter Meta+Enter"
     : "Enter Control+Enter Meta+Enter";
-  const backgroundShortcut = "Control+Shift+Enter Meta+Shift+Enter";
   const keyShortcuts = options.onBackgroundSubmit
-    ? `${ordinaryShortcut} ${backgroundShortcut}`
+    ? `${ordinaryShortcut} Control+Shift+Enter Meta+Shift+Enter`
     : ordinaryShortcut;
   return {
-    commandClient,
     attachmentProps,
     attachmentDropHandlers,
+    commandClient,
+    mentionDirectory: composerLocked ? undefined : mentionDirectory,
     composerLocked,
     visibleMessage,
     messagePlaceholder,
@@ -422,16 +409,27 @@ function createComposerPlaceholder(options: () => NewSessionComposerOptions) {
           : "";
 }
 
-/** The synchronous draft/controller owners prepare facts; Solid owns the persistent input DOM. */
 export function NewSessionComposer(props: { options: NewSessionComposerOptions }) {
   const frame = createMemo(() => prepareNewSessionComposer(props.options));
   const placeholder = createComposerPlaceholder(() => props.options);
   // The input and its synchronous owner share one mounted lifetime.
   const textarea = untrack(() => props.options.textareaController);
   createEffect(
-    () => [frame().commandClient, props.options.agentId, props.options.draftOwnerKey] as const,
-    ([client, agentId, draftOwnerKey]) =>
-      textarea.syncSkillCommandOwner(client, agentId, draftOwnerKey),
+    () =>
+      [
+        frame().commandClient,
+        props.options.agentId,
+        props.options.draftOwnerKey,
+        frame().mentionDirectory,
+        frame().composerLocked || props.options.nativeTerminal || textarea.composing,
+      ] as const,
+    ([client, agentId, draftOwnerKey, directory, locked]) => {
+      textarea.syncSkillCommandOwner(client, agentId, draftOwnerKey);
+      textarea.mentionMenu.syncDirectory(directory);
+      if (locked) {
+        textarea.emojiMenu.close();
+      }
+    },
   );
   const visibleMessage = createMemo(() => frame().visibleMessage);
   const messageValue = createLiveValue(visibleMessage);
@@ -464,17 +462,13 @@ export function NewSessionComposer(props: { options: NewSessionComposerOptions }
           },
         ]}
         onOpenclaw-composer-dismiss-invocations={() => {
-          props.options.textareaController.mentionMenu.close();
-          props.options.textareaController.emojiMenu.dismiss(
-            props.options.textareaController.getTextarea(),
-          );
+          textarea.mentionMenu.close();
+          textarea.emojiMenu.dismiss(textarea.getTextarea());
           props.options.onChange();
         }}
       >
         <openclaw-lobster-pet
-          prop:seed={lobsterPetSeed(
-            `${props.options.textareaController.critterVisit}:${props.options.draftOwnerKey}`,
-          )}
+          prop:seed={lobsterPetSeed(`${textarea.critterVisit}:${props.options.draftOwnerKey}`)}
           prop:mode={resolveLobsterPetMode(
             !props.options.context?.gateway.snapshot.offlineStable,
             props.options.context?.sessions.state.result?.sessions,
@@ -499,24 +493,11 @@ export function NewSessionComposer(props: { options: NewSessionComposerOptions }
             props.options.attachmentDraft.attachments.length === 0 &&
             props.options.attachmentDraft.reads.pendingReads === 0 &&
             !frame().menuVisible &&
-            !props.options.textareaController.capabilityMenuOpen
+            !textarea.capabilityMenuOpen
           }
         />
-        <HumanMentionMenuView
-          args={[
-            props.options.textareaController.mentionMenu,
-            frame().mentionMenuHost,
-            props.options.onChange,
-          ]}
-        />
-        <EmojiMenu
-          args={[
-            props.options.textareaController.emojiMenu,
-            "new-session",
-            props.options.textareaController.getTextarea(),
-            props.options.onChange,
-          ]}
-        />
+        <HumanMentionMenuView args={[textarea.mentionMenu, frame().mentionMenuHost]} />
+        <EmojiMenu args={[textarea.emojiMenu, "new-session", textarea.getTextarea()]} />
         <Show when={!props.options.nativeTerminal}>
           <ChatAttachmentInputs {...frame().attachmentProps} />
         </Show>
@@ -524,7 +505,7 @@ export function NewSessionComposer(props: { options: NewSessionComposerOptions }
           text={props.options.message}
           mentions={props.options.mentions}
           onRemove={() => props.options.onInput(props.options.message, [])}
-          avatarUrls={props.options.textareaController.mentionMenu.selectedAvatarUrls}
+          avatarUrls={textarea.mentionMenu.selectedAvatarUrls}
         />
         <AttachmentPreview {...frame().attachmentProps} readRevision={frame()} />
         <AttachmentReadStatus pendingReads={props.options.attachmentDraft.reads.pendingReads} />
@@ -576,27 +557,24 @@ export function NewSessionComposer(props: { options: NewSessionComposerOptions }
                         props.options.message,
                         target.value,
                         mentions,
-                        props.options.textareaController.mentionInput,
+                        textarea.mentionInput,
                       )
                     : undefined,
                 );
-                props.options.textareaController.mentionInput = undefined;
+                textarea.mentionInput = undefined;
                 frame().updateMenus(target, event);
               }}
               onBeforeInput={(event) => {
                 const target = event.currentTarget;
-                props.options.textareaController.mentionInput = {
+                textarea.mentionInput = {
                   value: target.value,
                   start: target.selectionStart,
                   end: target.selectionEnd,
                   inputType: event.inputType,
                 };
-                props.options.textareaController.emojiMenu.complete(
+                textarea.emojiMenu.complete(
                   event,
-                  props.options.onChange,
-                  !frame().composerLocked &&
-                    !props.options.nativeTerminal &&
-                    !props.options.textareaController.composing,
+                  !frame().composerLocked && !props.options.nativeTerminal && !textarea.composing,
                 );
               }}
               onSelect={(event) => frame().handleSelect(event)}
@@ -604,30 +582,26 @@ export function NewSessionComposer(props: { options: NewSessionComposerOptions }
               onPointerUp={(event) => frame().handleSelect(event)}
               onKeyUp={(event) => {
                 clearCompositionEnd(event);
-                props.options.textareaController.emojiMenu.handleKeyup(event);
+                textarea.emojiMenu.handleKeyup(event);
                 if (event.key.startsWith("Arrow") || event.key === "Home" || event.key === "End") {
                   frame().handleSelect(event);
                 }
               }}
               onBlur={(event) => {
                 clearCompositionEnd(event);
-                const emojiWasOpen = props.options.textareaController.emojiMenu.open;
-                props.options.textareaController.composing = false;
-                props.options.textareaController.emojiMenu.close();
-                if (emojiWasOpen) {
-                  props.options.onChange();
-                }
+                textarea.composing = false;
+                textarea.emojiMenu.close();
               }}
               onCompositionEnd={(event) => {
                 recordCompositionEnd(event);
-                props.options.textareaController.composing = false;
+                textarea.composing = false;
                 frame().updateMenus(event.currentTarget);
               }}
               onKeyDown={(event) => frame().handleComposerKeydown(event)}
               onCompositionStart={() => {
-                props.options.textareaController.composing = true;
-                props.options.textareaController.emojiMenu.close();
-                props.options.textareaController.mentionMenu.close();
+                textarea.composing = true;
+                textarea.emojiMenu.close();
+                textarea.mentionMenu.close();
                 props.options.onChange();
               }}
               onPaste={(event) => {
