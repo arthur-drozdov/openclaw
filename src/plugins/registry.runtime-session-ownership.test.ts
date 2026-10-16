@@ -17,19 +17,29 @@ import type { PluginRuntime } from "./runtime/types.js";
 
 type RunParams = Parameters<PluginRuntime["agent"]["runEmbeddedAgent"]>[0];
 
+function createRecord(id: string) {
+  return createPluginRecord({
+    id,
+    source: `/plugins/${id}/index.js`,
+    origin: "bundled",
+    enabled: true,
+    configSchema: false,
+  });
+}
+
+function pluginFixture(runtime: PluginRuntime, id: string, config: OpenClawConfig = {}) {
+  const registry = createRuntimeTestRegistry(runtime);
+  const record = createRecord(id);
+  return { registry, record, api: registry.createApi(record, { config }) };
+}
+
 function createApis(runtime: PluginRuntime, config: OpenClawConfig = {}) {
   const registry = createRuntimeTestRegistry(runtime);
-  return (id: string) =>
-    registry.createApi(
-      createPluginRecord({
-        id,
-        source: `/plugins/${id}/index.js`,
-        origin: "bundled",
-        enabled: true,
-        configSchema: false,
-      }),
-      { config },
-    );
+  return (id: string) => registry.createApi(createRecord(id), { config });
+}
+
+function sessionEntry(sessionId: string, fields: Partial<SessionEntry> = {}): SessionEntry {
+  return { sessionId, updatedAt: 1, ...fields };
 }
 
 describe("plugin registry runtime session ownership", () => {
@@ -82,15 +92,7 @@ describe("plugin registry runtime session ownership", () => {
         stored = { ...stored, delivery };
         return stored;
       };
-      const registry = createRuntimeTestRegistry(runtime);
-      const record = createPluginRecord({
-        id: "managed-writer",
-        source: "/plugins/managed-writer/index.js",
-        origin: "bundled",
-        enabled: true,
-        configSchema: false,
-      });
-      const api = registry.createApi(record, { config: {} });
+      const { registry, record, api } = pluginFixture(runtime, "managed-writer");
       const writing =
         operation === "upsert"
           ? api.runtime.agent.session.upsertSessionEntry({
@@ -124,15 +126,7 @@ describe("plugin registry runtime session ownership", () => {
           ? { sessionKey: "agent:main:managed", entry: selectedEntry }
           : undefined;
       };
-      const registry = createRuntimeTestRegistry(runtime);
-      const record = createPluginRecord({
-        id: "managed-reader",
-        source: "/plugins/managed-reader/index.js",
-        origin: "bundled",
-        enabled: true,
-        configSchema: false,
-      });
-      const api = registry.createApi(record, { config: {} });
+      const { registry, record, api } = pluginFixture(runtime, "managed-reader");
       const reading =
         selection === "key"
           ? api.runtime.agent.session.getSessionEntryAsync({ sessionKey: "agent:main:managed" })
@@ -171,15 +165,7 @@ describe("plugin registry runtime session ownership", () => {
           return { entries, assertCurrent: assertSourceCurrent };
         };
       };
-      const registry = createRuntimeTestRegistry(runtime);
-      const record = createPluginRecord({
-        id: "session-share",
-        source: "/plugins/session-share/index.js",
-        origin: "bundled",
-        enabled: true,
-        configSchema: false,
-      });
-      const api = registry.createApi(record, { config: {} });
+      const { registry, record, api } = pluginFixture(runtime, "session-share");
       const factory = api.runtime.agent.session.createSessionEntryListReader({
         agentId: "main",
         storePath: "/synthetic/sessions.json",
@@ -259,44 +245,36 @@ describe("plugin registry runtime session ownership", () => {
         storePath: "/tmp/sessions.json",
       },
     } satisfies RunParams;
-    const cases: Array<{
-      name: string;
-      storedRuntime?: string;
-      request: Partial<RunParams>;
-      expected?: string;
-    }> = [
-      { name: "stored request", storedRuntime: "openclaw", request: {}, expected: "openclaw" },
-      { name: "agent default provider", storedRuntime: "codex", request: {}, expected: "codex" },
-      {
-        name: "request config provider",
-        storedRuntime: "codex",
-        request: { config: { agents: { defaults: { model: "anthropic/request-model" } } } },
-      },
-      { name: "incompatible provider", storedRuntime: "codex", request: { provider: "anthropic" } },
-      { name: "model-ref provider", storedRuntime: "codex", request: { model: "anthropic/other" } },
-      {
-        name: "explicit runtime",
-        storedRuntime: "codex",
-        request: { agentHarnessRuntimeOverride: "openclaw" },
-        expected: "openclaw",
-      },
-      {
-        name: "explicit auto",
-        storedRuntime: "codex",
-        request: { agentHarnessRuntimeOverride: "auto" },
-        expected: "auto",
-      },
-      { name: "detached", storedRuntime: "codex", request: { sessionPersistence: "detached" } },
-      { name: "raw model", storedRuntime: "codex", request: { modelRun: true } },
-      { name: "observation only", request: {} },
+    const cases: Array<
+      [
+        name: string,
+        storedRuntime: string | undefined,
+        request: Partial<RunParams>,
+        expected?: string,
+      ]
+    > = [
+      ["stored request", "openclaw", {}, "openclaw"],
+      ["agent default provider", "codex", {}, "codex"],
+      [
+        "request config provider",
+        "codex",
+        { config: { agents: { defaults: { model: "anthropic/request-model" } } } },
+      ],
+      ["incompatible provider", "codex", { provider: "anthropic" }],
+      ["model-ref provider", "codex", { model: "anthropic/other" }],
+      ["explicit runtime", "codex", { agentHarnessRuntimeOverride: "openclaw" }, "openclaw"],
+      ["explicit auto", "codex", { agentHarnessRuntimeOverride: "auto" }, "auto"],
+      ["detached", "codex", { sessionPersistence: "detached" }],
+      ["raw model", "codex", { modelRun: true }],
+      ["observation only", undefined, {}],
     ];
-    for (const scenario of cases) {
-      entry.agentRuntimeOverride = scenario.storedRuntime;
-      await api.runtime.agent.runEmbeddedAgent({ ...runParams, ...scenario.request });
+    for (const [name, storedRuntime, request, expected] of cases) {
+      entry.agentRuntimeOverride = storedRuntime;
+      await api.runtime.agent.runEmbeddedAgent({ ...runParams, ...request });
       const forwarded = runEmbeddedAgent.mock.calls.at(-1)?.[0];
-      expect(forwarded?.agentHarnessId, scenario.name).toBeUndefined();
-      expect(forwarded?.agentHarnessRuntimeOverride, scenario.name).toBe(scenario.expected);
-      expect(executionScope?.pluginId, scenario.name).toBe("voice-call");
+      expect(forwarded?.agentHarnessId, name).toBeUndefined();
+      expect(forwarded?.agentHarnessRuntimeOverride, name).toBe(expected);
+      expect(executionScope?.pluginId, name).toBe("voice-call");
     }
     await expect(otherApi.runtime.agent.runEmbeddedAgent(runParams)).rejects.toThrow(
       'owned by plugin "voice-call"',
@@ -320,33 +298,22 @@ describe("plugin registry runtime session ownership", () => {
       mixed: "agent:main:harness:codex:mixed-owner",
     };
     const lock = { agentHarnessId: "codex", modelSelectionLocked: true as const };
-    const reserved = {
-      sessionId: "reserved-session",
-      updatedAt: 1,
+    const reserved = sessionEntry("reserved-session", {
       ...lock,
       sessionFile: formatSqliteSessionFileMarker({
         agentId: "main",
         sessionId: "reserved-session",
         storePath: "/tmp/sessions.json",
       }),
-    };
-    const ordinary = { sessionId: "ordinary-session", updatedAt: 1 };
-    const locked = { sessionId: "locked-ordinary-session", updatedAt: 1, ...lock };
-    const legacy = {
-      sessionId: "legacy-prefixed-session",
-      updatedAt: 1,
-      agentHarnessId: "legacy-runtime",
-    };
-    const plugin = {
-      sessionId: "plugin-owned-session",
-      updatedAt: 1,
-      ...lock,
-      pluginOwnerId: "other-plugin",
-    };
+    });
+    const ordinary = sessionEntry("ordinary-session");
+    const locked = sessionEntry("locked-ordinary-session", lock);
+    const legacy = sessionEntry("legacy-prefixed-session", { agentHarnessId: "legacy-runtime" });
+    const plugin = sessionEntry("plugin-owned-session", { ...lock, pluginOwnerId: "other-plugin" });
     const entries = {
       [key.plugin]: plugin,
       [key.mixed]: { ...plugin, sessionId: "mixed-owner-session" },
-      [key.alias]: { sessionId: reserved.sessionId, updatedAt: 1 },
+      [key.alias]: sessionEntry(reserved.sessionId),
       [key.noId]: { updatedAt: 1 },
       [key.lockedNoId]: { updatedAt: 1, ...lock },
       [key.reserved]: reserved,

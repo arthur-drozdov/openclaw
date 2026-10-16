@@ -15,6 +15,35 @@ import { createRuntimeTestRegistry } from "./registry-runtime.test-helpers.js";
 import { createPluginRuntime } from "./runtime/index.js";
 import type { PluginRuntime } from "./runtime/types.js";
 
+function createHarnessCaller(runtime: PluginRuntime, config: OpenClawConfig, callerId: string) {
+  const registry = createRuntimeTestRegistry(runtime);
+  const createApi = (id: string) =>
+    registry.createApi(
+      createPluginRecord({
+        id,
+        source: `/plugins/${id}/index.js`,
+        origin: "bundled",
+        enabled: true,
+        configSchema: false,
+      }),
+      { config },
+    );
+  const caller = createApi(callerId);
+  createApi("harness-owner").registerAgentHarness({
+    id: "test-harness",
+    label: "Test Harness",
+    supports: () => ({ supported: true }),
+    runAttempt: async () => {
+      throw new Error("unused");
+    },
+  });
+  return caller;
+}
+
+function lockedEntry(sessionId: string, updatedAt: number) {
+  return { sessionId, updatedAt, agentHarnessId: "test-harness", modelSelectionLocked: true };
+}
+
 describe("plugin registry SQLite session ownership", () => {
   it("resolves unscoped worker keys through the configured default agent", async () => {
     await withTempHome(async () => {
@@ -34,31 +63,7 @@ describe("plugin registry SQLite session ownership", () => {
       const runtime = createPluginRuntime({ subagent });
       let runtimeConfig = config;
       runtime.config = { ...runtime.config, current: () => runtimeConfig };
-      const pluginRegistry = createRuntimeTestRegistry(runtime);
-      const record = createPluginRecord({
-        id: "workboard",
-        source: "/plugins/workboard/index.js",
-        origin: "bundled",
-        enabled: true,
-        configSchema: false,
-      });
-      const api = pluginRegistry.createApi(record, { config });
-      const ownerRecord = createPluginRecord({
-        id: "harness-owner",
-        source: "/plugins/harness-owner/index.js",
-        origin: "bundled",
-        enabled: true,
-        configSchema: false,
-      });
-      const ownerApi = pluginRegistry.createApi(ownerRecord, { config });
-      ownerApi.registerAgentHarness({
-        id: "test-harness",
-        label: "Test Harness",
-        supports: () => ({ supported: true }),
-        runAttempt: async () => {
-          throw new Error("unused");
-        },
-      });
+      const api = createHarnessCaller(runtime, config, "workboard");
 
       try {
         const sessionKey = "subagent:workboard-default-unassigned";
@@ -76,12 +81,7 @@ describe("plugin registry SQLite session ownership", () => {
         const lockedSessionKey = "harness:test-harness:owned";
         await replaceSessionEntry(
           { agentId: "researcher", sessionKey: `agent:researcher:${lockedSessionKey}` },
-          {
-            sessionId: "owned-session",
-            updatedAt: 1,
-            agentHarnessId: "test-harness",
-            modelSelectionLocked: true,
-          },
+          lockedEntry("owned-session", 1),
         );
         await expect(
           api.runtime.subagent.run({ sessionKey: lockedSessionKey, message: "continue" }),
@@ -90,12 +90,7 @@ describe("plugin registry SQLite session ownership", () => {
 
         await replaceSessionEntry(
           { agentId: "replacement", sessionKey: `agent:replacement:${sessionKey}` },
-          {
-            sessionId: "replacement-owned-session",
-            updatedAt: 2,
-            agentHarnessId: "test-harness",
-            modelSelectionLocked: true,
-          },
+          lockedEntry("replacement-owned-session", 2),
         );
         const pending = api.runtime.subagent.run({ sessionKey, message: "continue" });
         runtimeConfig = { agents: { entries: { replacement: {} } } };
@@ -127,12 +122,7 @@ describe("plugin registry SQLite session ownership", () => {
         );
         await replaceSessionEntry(
           { agentId: "researcher", sessionKey: lockedKey },
-          {
-            sessionId: lockedSessionId,
-            updatedAt: 2,
-            agentHarnessId: "test-harness",
-            modelSelectionLocked: true,
-          },
+          lockedEntry(lockedSessionId, 2),
         );
 
         const runtime = createPluginRuntime();
@@ -143,33 +133,7 @@ describe("plugin registry SQLite session ownership", () => {
           configurable: true,
           value: runEmbeddedAgent,
         });
-        const pluginRegistry = createRuntimeTestRegistry(runtime);
-        const ownerRecord = createPluginRecord({
-          id: "harness-owner",
-          source: "/plugins/harness-owner/index.js",
-          origin: "bundled",
-          enabled: true,
-          configSchema: false,
-        });
-        const callerRecord = createPluginRecord({
-          id: "extractor-plugin",
-          source: "/plugins/extractor-plugin/index.js",
-          origin: "bundled",
-          enabled: true,
-          configSchema: false,
-        });
-        const ownerApi = pluginRegistry.createApi(ownerRecord, { config: {} as OpenClawConfig });
-        const callerApi = pluginRegistry.createApi(callerRecord, {
-          config: {} as OpenClawConfig,
-        });
-        ownerApi.registerAgentHarness({
-          id: "test-harness",
-          label: "Test Harness",
-          supports: () => ({ supported: true }),
-          runAttempt: async () => {
-            throw new Error("unused");
-          },
-        });
+        const callerApi = createHarnessCaller(runtime, {}, "extractor-plugin");
         const runParams = {
           sessionId,
           sessionKey,

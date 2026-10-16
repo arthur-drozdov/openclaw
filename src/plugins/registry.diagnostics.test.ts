@@ -47,6 +47,11 @@ function createRegistrationFixture() {
   return { builder, registry: builder.registry, createRecord, createPlugin };
 }
 
+function diagnostics(pluginId: string, level: "warn" | "error", messages: string[]) {
+  const source = `/plugins/${pluginId}/index.ts`;
+  return messages.map((message) => ({ level, pluginId, source, message }));
+}
+
 describe("plugin registration diagnostics", () => {
   it.each([
     { modelProvider: undefined, warns: true },
@@ -63,17 +68,15 @@ describe("plugin registration diagnostics", () => {
       api.registerCliBackend(backend);
 
       expect(registry.diagnostics).toEqual(
-        warns
-          ? [
-              {
-                level: "warn",
-                pluginId: "acme-plugin",
-                source: "/plugins/acme-plugin/index.ts",
-                message:
-                  'cli backend "acme-cli" is missing modelProvider; provider-to-runtime binding will be skipped. Set modelProvider to the canonical model provider id to enable this binding.',
-              },
-            ]
-          : [],
+        diagnostics(
+          "acme-plugin",
+          "warn",
+          warns
+            ? [
+                'cli backend "acme-cli" is missing modelProvider; provider-to-runtime binding will be skipped. Set modelProvider to the canonical model provider id to enable this binding.',
+              ]
+            : [],
+        ),
       );
       expect(registry.cliBackends).toEqual([
         expect.objectContaining({ pluginId: "acme-plugin", backend }),
@@ -87,7 +90,6 @@ describe("plugin registration diagnostics", () => {
     const { record: alpha, api: alphaApi } = createPlugin("alpha");
     const { record: beta, api: betaApi } = createPlugin("beta");
     const alphaSource = "/plugins/alpha/resolved.ts";
-    const betaSource = "/plugins/beta/index.ts";
     alpha.source = alphaSource;
 
     alphaApi.registerService({ id: "", start() {} });
@@ -104,6 +106,7 @@ describe("plugin registration diagnostics", () => {
     alphaApi.on("unknown-hook", () => {});
     betaApi.registerRuntimeLifecycle({ id: "" });
 
+    const betaSource = "/plugins/beta/index.ts";
     const expected = [
       ["error", "alpha", alphaSource, "service registration missing id"],
       ["error", "beta", betaSource, "context engine registration missing id"],
@@ -120,14 +123,16 @@ describe("plugin registration diagnostics", () => {
       ["error", "beta", betaSource, "runtime lifecycle registration missing id"],
     ].map(([level, pluginId, source, message]) => ({ level, pluginId, source, message }));
     expect(registry.diagnostics).toEqual(expected);
-    expect(registry.services).toEqual([]);
     expect(registry.contextEngines.size).toBe(0);
-    expect(registry.reloads).toEqual([]);
-    expect(registry.textTransforms).toEqual([]);
-    expect(registry.memoryPromptSupplements).toEqual([]);
-    expect(registry.hostedMediaResolvers).toEqual([]);
-    expect(registry.typedHooks).toEqual([]);
-    expect(registry.runtimeLifecycles).toEqual([]);
+    expect(registry).toMatchObject({
+      services: [],
+      reloads: [],
+      textTransforms: [],
+      memoryPromptSupplements: [],
+      hostedMediaResolvers: [],
+      typedHooks: [],
+      runtimeLifecycles: [],
+    });
 
     alpha.source = "/plugins/alpha/later.ts";
     alphaApi.registerService({ id: "alpha-service", start() {} });
@@ -146,17 +151,18 @@ describe("plugin registration diagnostics", () => {
       contracts: { speechProviders: ["shared-speech"] },
     });
     const { record: beta, api: betaApi } = createPlugin("beta");
+    const audio = () => ({
+      audioBuffer: Buffer.from("alpha audio"),
+      outputFormat: "wav",
+      fileExtension: ".wav",
+      voiceCompatible: false,
+    });
     const speech = {
       id: "shared-speech",
       label: "Shared speech",
       models: ["speech-model"],
       isConfigured: () => true,
-      synthesize: vi.fn(async () => ({
-        audioBuffer: Buffer.from("alpha audio"),
-        outputFormat: "wav",
-        fileExtension: ".wav",
-        voiceCompatible: false,
-      })),
+      synthesize: vi.fn(async () => audio()),
     } satisfies Parameters<OpenClawPluginApi["registerSpeechProvider"]>[0];
     const media = { id: "shared-media" };
     alphaApi.registerSpeechProvider(speech);
@@ -172,28 +178,17 @@ describe("plugin registration diagnostics", () => {
     betaApi.registerMediaUnderstandingProvider({ ...media });
 
     expect(registry.diagnostics).toEqual(
-      [
+      diagnostics("beta", "error", [
         "speech provider registration missing id",
         "speech provider already registered: shared-speech (alpha)",
         "media provider registration missing id",
         "media provider already registered: shared-media (alpha)",
-      ].map((message) => ({
-        level: "error",
-        pluginId: "beta",
-        source: "/plugins/beta/index.ts",
-        message,
-      })),
+      ]),
     );
-    expect(
-      registry.speechProviders.map(({ pluginId, provider }) => ({ pluginId, provider })),
-    ).toEqual([
+    expect(registry.speechProviders).toMatchObject([
       {
         pluginId: "alpha",
-        provider: expect.objectContaining({
-          id: "shared-speech",
-          label: "Shared speech",
-          models: ["speech-model"],
-        }),
+        provider: { id: "shared-speech", label: "Shared speech", models: ["speech-model"] },
       },
     ]);
     expect(speech.synthesize).not.toHaveBeenCalled();
@@ -208,30 +203,23 @@ describe("plugin registration diagnostics", () => {
         target: "audio-file",
         timeoutMs: 1_000,
       }),
-    ).resolves.toEqual({
-      audioBuffer: Buffer.from("alpha audio"),
-      outputFormat: "wav",
-      fileExtension: ".wav",
-      voiceCompatible: false,
-    });
+    ).resolves.toEqual(audio());
     expect(speech.synthesize).toHaveBeenCalledOnce();
     expect(
-      registry.mediaUnderstandingProviders.map(({ pluginId, provider }) => ({
-        pluginId,
-        provider,
-      })),
-    ).toEqual([{ pluginId: "alpha", provider: media }]);
-    expect(alpha.speechProviderIds).toEqual(["shared-speech"]);
-    expect(alpha.mediaUnderstandingProviderIds).toEqual(["shared-media"]);
-    expect(beta.speechProviderIds).toEqual([]);
-    expect(beta.mediaUnderstandingProviderIds).toEqual([]);
+      registry.mediaUnderstandingProviders.map(({ pluginId, provider }) => [pluginId, provider]),
+    ).toEqual([["alpha", media]]);
+    expect(alpha).toMatchObject({
+      speechProviderIds: ["shared-speech"],
+      mediaUnderstandingProviderIds: ["shared-media"],
+    });
+    expect(beta).toMatchObject({ speechProviderIds: [], mediaUnderstandingProviderIds: [] });
     expect(
-      registry.modelCatalogProviders.map(({ pluginId, provider }) => ({
+      registry.modelCatalogProviders.map(({ pluginId, provider }) => [
         pluginId,
-        provider: provider.provider,
-        kinds: provider.kinds,
-      })),
-    ).toEqual([{ pluginId: "alpha", provider: "shared-speech", kinds: ["voice"] }]);
+        provider.provider,
+        provider.kinds,
+      ]),
+    ).toEqual([["alpha", "shared-speech", ["voice"]]]);
   });
 
   it("keeps reentrant diagnostics host-owned and stops coercion after registration throws", () => {
@@ -264,25 +252,18 @@ describe("plugin registration diagnostics", () => {
       );
     expect(register).toThrow("registration failed");
 
-    const expected = [
+    const expected = diagnostics("owner", "warn", [
       "reload registration missing prefixes",
       'unknown typed hook "unknown-hook" ignored',
-    ].map((message) => ({
-      level: "warn",
-      pluginId: "owner",
-      source: "/plugins/owner/index.ts",
-      message,
-    }));
+    ]);
     expect(registry.diagnostics).toEqual(expected);
-    expect(record.id).toBe("owner");
-    expect(record.source).toBe("/plugins/owner/index.ts");
+    expect(record).toMatchObject({ id: "owner", source: "/plugins/owner/index.ts" });
     const retained = expectDefined(captured, "captured registration API");
     // @ts-expect-error Closed registration must stop before coercing untyped hook input.
     expect(retained.on(hookName, () => {})).toBeUndefined();
     expect(coercions).toBe(1);
     expect(registry.diagnostics).toEqual(expected);
-    expect(registry.typedHooks).toEqual([]);
-    expect(registry.reloads).toEqual([]);
+    expect(registry).toMatchObject({ typedHooks: [], reloads: [] });
   });
 });
 
@@ -334,12 +315,9 @@ describe("plugin service registration identity", () => {
     try {
       await services.reload({}, new Set(["native-service"]));
       await services.stop();
-      expect(calls).toEqual([
-        { phase: "start", value: 37, runtime },
-        { phase: "stop", value: 37, runtime },
-        { phase: "start", value: 37, runtime },
-        { phase: "stop", value: 37, runtime },
-      ]);
+      expect(calls).toEqual(
+        ["start", "stop", "start", "stop"].map((phase) => ({ phase, value: 37, runtime })),
+      );
       expect(calls.every((call) => call.runtime === runtime)).toBe(true);
     } finally {
       await services.stop();
@@ -347,9 +325,8 @@ describe("plugin service registration identity", () => {
   });
 
   it("contains unreadable IDs without leaking accessor errors", () => {
-    const { builder, createRecord } = createRegistrationFixture();
-    const record = createRecord("unreadable-owner");
-    const api = builder.createApi(record, { config: {} });
+    const { registry, createPlugin } = createRegistrationFixture();
+    const { api } = createPlugin("unreadable-owner");
     const service = {
       get id(): string {
         throw new Error("private accessor failure");
@@ -359,18 +336,16 @@ describe("plugin service registration identity", () => {
     };
     expect(() => api.registerService(service)).not.toThrow();
     expect(() => api.registerGatewayDiscoveryService(service)).not.toThrow();
-    expect(builder.registry.services).toEqual([]);
-    expect(builder.registry.gatewayDiscoveryServices).toEqual([]);
-    expect(builder.registry.diagnostics.map(({ message }) => message)).toEqual([
+    expect(registry).toMatchObject({ services: [], gatewayDiscoveryServices: [] });
+    expect(registry.diagnostics.map(({ message }) => message)).toEqual([
       "service registration id cannot be normalized",
       "gateway discovery service registration id cannot be normalized",
     ]);
   });
 
   it("snapshots each namespace independently without writing plugin accessors", () => {
-    const { builder, createRecord } = createRegistrationFixture();
-    const record = createRecord("shared-owner");
-    const api = builder.createApi(record, { config: {} });
+    const { registry, createPlugin } = createRegistrationFixture();
+    const { record, api } = createPlugin("shared-owner");
     let rawId = " shared-service ";
     class Service extends Date {
       get id() {
@@ -388,18 +363,17 @@ describe("plugin service registration identity", () => {
     rawId = "changed-after-registration";
     api.registerService({ id: "shared-service", start() {} });
     api.registerGatewayDiscoveryService({ id: "shared-service", advertise() {} });
-    expect(builder.registry.services).toHaveLength(1);
-    expect(builder.registry.gatewayDiscoveryServices).toHaveLength(1);
-    for (const entry of [
-      ...builder.registry.services,
-      ...builder.registry.gatewayDiscoveryServices,
-    ]) {
-      expect(entry.id).toBe("shared-service");
+    expect(registry.services).toHaveLength(1);
+    expect(registry.gatewayDiscoveryServices).toHaveLength(1);
+    for (const entry of [...registry.services, ...registry.gatewayDiscoveryServices]) {
+      expect(entry).toMatchObject({ id: "shared-service" });
       expect(entry.service).toBe(service);
     }
-    expect(record.services).toEqual(["shared-service"]);
-    expect(record.gatewayDiscoveryServiceIds).toEqual(["shared-service"]);
-    expect(builder.registry.diagnostics).toEqual([]);
+    expect(record).toMatchObject({
+      services: ["shared-service"],
+      gatewayDiscoveryServiceIds: ["shared-service"],
+    });
+    expect(registry.diagnostics).toEqual([]);
   });
 
   it("retains the first service when a different owner claims its normalized ID", async () => {
