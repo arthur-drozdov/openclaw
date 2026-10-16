@@ -11,7 +11,6 @@ import type { PluginGatewayDiscoveryServiceRegistration } from "../plugins/regis
 import { createEmptyPluginRegistry, createPluginRegistry } from "../plugins/registry.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { captureFullEnv } from "../test-utils/env.js";
-import { createGatewayPluginRuntimeGeneration } from "./server-plugin-runtime-generation.js";
 
 type WriteWideAreaGatewayZone = typeof import("../infra/widearea-dns.js").writeWideAreaGatewayZone;
 type ResolveWideAreaDiscoveryDomain =
@@ -48,9 +47,6 @@ vi.mock("./server-discovery.js", () => ({
 
 const { startGatewayDiscovery } = await import("./server-discovery-runtime.js");
 
-const createPluginOwner = () =>
-  createGatewayPluginRuntimeGeneration({ getServices: () => null, setServices: () => {} });
-
 const makeLogs = () => ({
   info: vi.fn(),
   warn: vi.fn(),
@@ -61,7 +57,6 @@ function startDiscovery(overrides: Partial<Parameters<typeof startGatewayDiscove
     machineDisplayName: "Lab Mac",
     port: 18789,
     tailscaleMode: "off",
-    pluginRuntimeClaim: createPluginOwner().currentClaim(),
     logDiscovery: makeLogs(),
     ...overrides,
   });
@@ -475,24 +470,17 @@ describe("startGatewayDiscovery", () => {
       });
       const changedStop = vi.fn();
       const changed = makeDiscoveryService({ id: "changed", stop: changedStop });
-      const pluginOwner = createPluginOwner();
       const starting = startDiscovery({
         gatewayDiscoveryServices: [changed, retained],
-        pluginRuntimeClaim: pluginOwner.currentClaim(),
       });
       await vi.advanceTimersByTimeAsync(10);
       const discovery = await starting;
-      const reservation = pluginOwner.reserve();
       try {
         await discovery.update({ gatewayDiscoveryServices: [retained] });
         expect(changedStop).toHaveBeenCalledOnce();
         expect(retainedStop).not.toHaveBeenCalled();
         const next = makeDiscoveryService({ id: "changed" });
-        reservation.commit();
-        const updating = discovery.update(
-          { gatewayDiscoveryServices: [next, retained] },
-          reservation.claim,
-        );
+        const updating = discovery.update({ gatewayDiscoveryServices: [next, retained] });
         await vi.advanceTimersByTimeAsync(10);
         await updating;
         result.resolve({ stop: retainedStop });
@@ -501,7 +489,6 @@ describe("startGatewayDiscovery", () => {
         expect(retainedStop).not.toHaveBeenCalled();
         expect(next.service.advertise).toHaveBeenCalledOnce();
       } finally {
-        reservation.reject();
         result.resolve({ stop: retainedStop });
         await vi.advanceTimersByTimeAsync(0);
         await discovery.stop();
@@ -728,82 +715,24 @@ describe("startGatewayDiscovery", () => {
     expect(stop).toHaveBeenCalledOnce();
   });
 
-  it.each(["reject", "replace", "shutdown"] as const)(
-    "settles a plugin reservation after an in-flight advertisement: %s",
-    async (action) => {
-      useDevelopmentDiscoveryEnv();
-      const pluginOwner = createPluginOwner();
-      const started = createDeferredCore();
-      const result = createDeferredCore<{ stop: () => void }>();
-      const oldStop = vi.fn();
-      const old = makeDiscoveryService({
-        id: "old",
-        advertise: vi.fn(() => {
-          started.resolve();
-          return result.promise;
-        }),
-      });
-      const peer = makeDiscoveryService({ id: "peer" });
-      const discovery = await startDiscovery({
-        pluginRuntimeClaim: pluginOwner.currentClaim(),
-        discovery: { mdns: { mode: "off" } },
-      });
-      await discovery.update({ gatewayDiscoveryServices: [old, peer] }, pluginOwner.currentClaim());
-      const enabling = discovery.update({ mdnsMode: "full" });
-      await started.promise;
-      const replacement = pluginOwner.reserve();
-      result.resolve({ stop: oldStop });
-      await enabling;
-      expect(oldStop).not.toHaveBeenCalled();
-      expect(peer.service.advertise).not.toHaveBeenCalled();
-
-      if (action === "reject") {
-        replacement.reject();
-        await vi.waitFor(() => expect(peer.service.advertise).toHaveBeenCalledOnce());
-        expect(old.service.advertise).toHaveBeenCalledOnce();
-        expect(oldStop).not.toHaveBeenCalled();
-      } else if (action === "replace") {
-        replacement.commit();
-        // Runtime policy commits before the replacement registry is available.
-        await discovery.update({ mdnsMode: "minimal" });
-        expect(oldStop).toHaveBeenCalledOnce();
-        expect(old.service.advertise).toHaveBeenCalledOnce();
-        const next = makeDiscoveryService({ id: "next" });
-        await discovery.update({ gatewayDiscoveryServices: [next] }, replacement.claim);
-        expect(next.service.advertise).toHaveBeenCalledWith(
-          expect.objectContaining({ minimal: true, cliPath: undefined, sshPort: undefined }),
-        );
-      } else {
-        await discovery.stop();
-        replacement.reject();
-        await pluginOwner.currentClaim().waitForUnblocked();
-      }
-      await discovery.stop();
-      expect(oldStop).toHaveBeenCalledOnce();
-      if (action !== "reject") {
-        expect(peer.service.advertise).not.toHaveBeenCalled();
-      }
-    },
-  );
-
   it("retires the initial registry before a first mixed plugin and mode reload", async () => {
     useDevelopmentDiscoveryEnv();
-    const pluginOwner = createPluginOwner();
     const oldStop = vi.fn();
     const old = makeDiscoveryService({ id: "old", stop: oldStop });
     const discovery = await startDiscovery({
       discovery: { mdns: { mode: "full" } },
       gatewayDiscoveryServices: [old],
-      pluginRuntimeClaim: pluginOwner.currentClaim(),
     });
     try {
-      const replacement = pluginOwner.reserve();
-      replacement.commit();
       await discovery.update({ mdnsMode: "minimal" });
       expect(oldStop).toHaveBeenCalledOnce();
-      expect(old.service.advertise).toHaveBeenCalledOnce();
+      expect(old.service.advertise).toHaveBeenCalledTimes(2);
+      expect(old.service.advertise).toHaveBeenLastCalledWith(
+        expect.objectContaining({ minimal: true }),
+      );
       const next = makeDiscoveryService({ id: "next" });
-      await discovery.update({ gatewayDiscoveryServices: [next] }, replacement.claim);
+      await discovery.update({ gatewayDiscoveryServices: [next] });
+      expect(oldStop).toHaveBeenCalledTimes(2);
       expect(next.service.advertise).toHaveBeenCalledWith(
         expect.objectContaining({ minimal: true }),
       );

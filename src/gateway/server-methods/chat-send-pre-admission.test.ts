@@ -323,31 +323,61 @@ describe("chat send retry identity", () => {
     expectConflict(params.respond);
   });
 
-  it("transfers the pending input identity when an abort precedes active registration", async () => {
-    const params = retryFixture("early-abort-retry");
-    params.context.dedupe.set(params.session.pendingChatSendKey, {
-      ts: 100,
-      ok: true,
-      requestIdentity: params.request.requestIdentity,
-      payload: {
+  it.each(["present", "evicted", "replaced"] as const)(
+    "keeps original abort identity with a %s pending reservation",
+    async (state) => {
+      const params = retryFixture(`early-abort-retry-${state}`);
+      const payload = {
         runId: params.session.clientRunId,
         status: "accepted",
         sessionKey: params.session.sessionKey,
-        attemptId: "attempt",
-      },
-    });
-    writePreRegisteredChatAbort({
-      context: params.context,
-      runId: params.session.clientRunId,
-      stopReason: "rpc",
-      attemptId: "attempt",
-      endedAt: 200,
-    });
-    params.request.requestIdentity = "changed-after-abort";
-    expect(respondChatSendRetry(params, await prepareChatSendRetryComparison(params))).toBe(true);
-    expectConflict(params.respond);
-    expect(params.context.dedupe.has(params.session.pendingChatSendKey)).toBe(false);
-  });
+      };
+      params.context.dedupe.set(params.session.pendingChatSendKey, {
+        ts: 100,
+        ok: true,
+        requestIdentity: params.request.requestIdentity,
+        payload,
+      });
+      if (state === "evicted") {
+        params.context.dedupe.delete(params.session.pendingChatSendKey);
+      } else if (state === "replaced") {
+        params.context.dedupe.set(params.session.pendingChatSendKey, {
+          ts: 150,
+          ok: true,
+          requestIdentity: "successor-input",
+          payload: { ...payload },
+        });
+      }
+      const pending = params.context.dedupe.get(params.session.pendingChatSendKey);
+      const abort = {
+        context: params.context,
+        runId: params.session.clientRunId,
+        stopReason: "rpc",
+        endedAt: 200,
+      };
+      if (state !== "present") {
+        // Stop must still find its selected row; admission may outlive eviction.
+        expect(writePreRegisteredChatAbort({ ...abort, expectedPayload: payload })).toBe(false);
+      }
+      expect(
+        writePreRegisteredChatAbort({
+          ...abort,
+          ownPendingPayload: payload,
+          requestIdentity: params.request.requestIdentity,
+        }),
+      ).toBe(state !== "replaced");
+      if (state === "replaced") {
+        expect(params.context.dedupe.get(params.session.pendingChatSendKey)).toBe(pending);
+        expect(params.context.dedupe.has(`chat:${params.session.clientRunId}`)).toBe(false);
+        expect(params.context.chatRunState.hasAbortMarker(params.session.clientRunId)).toBe(false);
+        return;
+      }
+      params.request.requestIdentity = "changed-after-abort";
+      expect(respondChatSendRetry(params, await prepareChatSendRetryComparison(params))).toBe(true);
+      expectConflict(params.respond);
+      expect(params.context.dedupe.has(params.session.pendingChatSendKey)).toBe(false);
+    },
+  );
 
   it.each(["different", undefined])(
     "rejects a durable source retry with fingerprint %s",
