@@ -19,17 +19,18 @@ vi.mock("openclaw/plugin-sdk/ssrf-runtime", () => ({ fetchWithSsrFGuard: guarded
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const fileLimit = 5 * 1024 * 1024;
+const signal = new AbortController().signal;
 let stateDir: string;
 let workspaceDir: string;
-let signal: AbortSignal;
+let outboundDir: string;
 
 beforeEach(async () => {
   const directory = tempDirs.make("agentsapi-files-");
   stateDir = path.join(directory, "state");
+  outboundDir = path.join(stateDir, "media", "outbound");
   workspaceDir = path.join(directory, "workspace");
   await fs.mkdir(workspaceDir);
   vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
-  signal = new AbortController().signal;
 });
 
 afterEach(() => {
@@ -42,19 +43,8 @@ function prepare(media: Parameters<typeof prepareInputs>[0]) {
   return prepareInputs(media, workspaceDir, () => {}, signal);
 }
 
-function mapping(prepared: Awaited<ReturnType<typeof prepareInputs>>) {
-  return JSON.parse(prepared.mappingText.split("\n")[1]!);
-}
-
 function save(bytes: string | Buffer, subdir: "inbound" | "outbound" = "inbound") {
   return saveMediaBuffer(typeof bytes === "string" ? Buffer.from(bytes) : bytes, undefined, subdir);
-}
-
-async function write(relativePath: string, bytes: string | Buffer) {
-  const filePath = path.join(workspaceDir, relativePath);
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, bytes);
-  return filePath;
 }
 
 describe("Agents API input attachment custody", () => {
@@ -70,93 +60,74 @@ describe("Agents API input attachment custody", () => {
     ]);
 
     expect(decodedFiles(prepared)).toEqual([bytes, Buffer.from("previous output")]);
-    expect(path.posix.dirname(prepared.files[0]!.path)).toBe("/workspace/inputs");
-    expect(path.posix.basename(prepared.files[0]!.path)).toMatch(
-      /^[a-zA-Z0-9._-]+-deliver__escape_\.bin$/u,
+    expect(prepared.files[0]!.path).toMatch(
+      /^\/workspace\/inputs\/[\w.-]+-deliver__escape_\.bin$/u,
     );
     expect(prepared.mappingText.split("\n")).toHaveLength(3);
-    expect(mapping(prepared)).toEqual([
+    expect(JSON.parse(prepared.mappingText.split("\n")[1]!)).toEqual([
       { attachment: 1, name, path: prepared.files[0]!.path },
       { attachment: 2, name: "previous.txt", path: prepared.files[1]!.path },
     ]);
   });
 
-  it.each(["staged bytes", "managed original"])(
-    "uploads %s for an attachment in an owned staging directory",
+  it.each(["owned", "managed", "project", "unowned", "workspace", "foreign"])(
+    "enforces attachment custody: %s",
     async (source) => {
       const fixture = await createStagedInputOwnershipFixture(workspaceDir);
       const stagedBytes = Buffer.from("name,value\nstaged,42\n");
       const originalBytes = Buffer.from("name,value\noriginal,73\n");
-      const stagedPath = await write(fixture.ownedFiles[0]!, stagedBytes);
-      const managed = source === "managed original" ? await save(originalBytes) : undefined;
-      const prepared = await prepare([
+      const foreign = source === "foreign";
+      const managed = source === "managed" || foreign ? await save(originalBytes) : undefined;
+      const accepted = source === "owned" || source === "managed";
+      const relativePath =
+        source === "project"
+          ? "project/input-secret.txt"
+          : source === "unowned"
+            ? fixture.unownedFiles[2]!
+            : foreign
+              ? path.join("inbound", managed!.id)
+              : fixture.ownedFiles[0]!;
+      const filePath = path.join(workspaceDir, relativePath);
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, stagedBytes);
+      const prepared = prepare([
         {
-          path: stagedPath,
-          workspaceDir,
+          path: filePath,
+          workspaceDir: source === "workspace" ? stateDir : workspaceDir,
           ...(managed ? { url: `media://inbound/${managed.id}` } : {}),
+          ...(!accepted && !foreign ? { staged: true } : {}),
+          ...(foreign ? { sizeBytes: fileLimit + 1 } : {}),
         },
       ]);
-
-      expect(decodedFiles(prepared)).toEqual([managed ? originalBytes : stagedBytes]);
+      if (accepted) {
+        expect(decodedFiles(await prepared)).toEqual([managed ? originalBytes : stagedBytes]);
+      } else {
+        await expect(prepared).rejects.toThrow(
+          foreign
+            ? "does not match its managed media identity"
+            : source === "workspace"
+              ? "requires a host-prepared managed media source"
+              : "is not owned by the workspace staging service",
+        );
+      }
     },
   );
-
-  it.each(["project file", "unowned staging directory", "different workspace"])(
-    "rejects a %s without granting custody from attachment metadata",
-    async (source) => {
-      const fixture = await createStagedInputOwnershipFixture(workspaceDir);
-      const relativePath =
-        source === "project file"
-          ? "project/input-secret.txt"
-          : source === "different workspace"
-            ? fixture.ownedFiles[0]!
-            : fixture.unownedFiles[2]!;
-      const filePath = await write(relativePath, "private project bytes");
-      await expect(
-        prepare([
-          {
-            path: filePath,
-            workspaceDir: source === "different workspace" ? stateDir : workspaceDir,
-            staged: true,
-          },
-        ]),
-      ).rejects.toThrow(
-        source === "different workspace"
-          ? "requires a host-prepared managed media source"
-          : "is not owned by the workspace staging service",
-      );
-    },
-  );
-
-  it("rejects a foreign absolute path despite a managed URL and matching workspace metadata", async () => {
-    const saved = await save("managed bytes");
-    const foreignPath = await write(path.join("inbound", saved.id), "foreign bytes");
-    await expect(
-      prepare([
-        {
-          path: foreignPath,
-          url: `media://inbound/${saved.id}`,
-          workspaceDir,
-          sizeBytes: fileLimit + 1,
-        },
-      ]),
-    ).rejects.toThrow("does not match its managed media identity");
-  });
 
   it("keeps accepted files and explains omissions at actual byte limits, independent of metadata", async () => {
     const bytes = Buffer.alloc(fileLimit, 97);
     const full = await save(bytes);
     const extra = await save("x");
     const fact = { path: full.path, sizeBytes: 1 };
-    const prepared = await prepare([fact, fact]);
-    expect(decodedFiles(prepared)).toEqual([bytes, bytes]);
+    expect(decodedFiles(await prepare([fact, fact]))).toEqual([bytes, bytes]);
 
     const smaller = await save(bytes.subarray(1));
     const partial = await prepare([fact, { path: extra.path }, fact, { path: smaller.path }]);
     expect(decodedFiles(partial)).toEqual([bytes, Buffer.from("x"), bytes.subarray(1)]);
-    expect(mapping(partial).map(({ attachment }: { attachment: number }) => attachment)).toEqual([
-      1, 2, 4,
-    ]);
+    expect(
+      JSON.parse(partial.mappingText.split("\n")[1]!).map(
+        ({ attachment }: { attachment: number }) => attachment,
+      ),
+    ).toEqual([1, 2, 4]);
     expect(partial.feedbackText).toContain(
       '{"attachment":3,"reason":"exceeds the remaining 10 MiB total transfer budget"}',
     );
@@ -180,34 +151,27 @@ describe("Agents API input attachment custody", () => {
     );
   });
 
-  it.each([Number.NaN, -1])(
-    "rejects invalid size metadata %s without treating it as a limit omission",
-    async (sizeBytes) => {
-      const saved = await save("x");
-      await expect(prepare([{ path: saved.path, sizeBytes }])).rejects.toThrow(
-        "Agents API input attachment has an invalid size",
-      );
-    },
-  );
+  it.each([Number.NaN, -1])("rejects invalid size %s, not an omission", async (sizeBytes) => {
+    const saved = await save("x");
+    await expect(prepare([{ path: saved.path, sizeBytes }])).rejects.toThrow(
+      "Agents API input attachment has an invalid size",
+    );
+  });
 
-  it("stops before reading attachments when the attempt is already cancelled or revoked", async () => {
+  it.each(["cancelled", "revoked"])("stops before reading when %s", async (mode) => {
     const saved = await save("owned bytes");
-    const cancelled = new AbortController();
-    const cancellation = new Error("fixture cancellation");
-    cancelled.abort(cancellation);
-    await expect(
-      prepareInputs([{ path: saved.path }], workspaceDir, () => {}, cancelled.signal),
-    ).rejects.toBe(cancellation);
+    const controller = new AbortController();
     const revocation = new Error("fixture authority revoked");
+    if (mode === "cancelled") {
+      controller.abort(revocation);
+    }
+    const assertCurrent = () => {
+      if (mode === "revoked") {
+        throw revocation;
+      }
+    };
     await expect(
-      prepareInputs(
-        [{ path: saved.path }],
-        workspaceDir,
-        () => {
-          throw revocation;
-        },
-        signal,
-      ),
+      prepareInputs([{ path: saved.path }], workspaceDir, assertCurrent, controller.signal),
     ).rejects.toBe(revocation);
   });
 });
@@ -221,12 +185,7 @@ describe("Agents API output attachment publication", () => {
   beforeEach(async () => {
     host = await createAdmittedHostCapabilityTestFixture({
       runId: "run-output-files",
-      agentId: "main",
-      sessionId: "session-output-files",
-      sessionKey: "agent:main:session-output-files",
       workspaceDir,
-      cwd: workspaceDir,
-      config: {},
     });
   });
   afterEach(() => {
@@ -234,24 +193,15 @@ describe("Agents API output attachment publication", () => {
     host.closeAdmission();
   });
 
-  function collect(
-    client: AgentsApiClient,
-    assertCurrent: () => void = () => {},
-    transferSignal = signal,
-  ) {
+  function collect(client: AgentsApiClient, guard = () => {}, abortSignal = signal) {
     return collectOutputs(
       client,
       "session-files",
       "turn-files",
-      assertCurrent,
-      transferSignal,
+      guard,
+      abortSignal,
       host.hostCapabilities.prepareReplyMedia,
     );
-  }
-
-  async function rejectsWithoutOutput(client: AgentsApiClient, message: string) {
-    await expect(collect(client)).rejects.toThrow(message);
-    expect(await outboundFiles()).toEqual([]);
   }
 
   it("persists current-turn deliverables as managed outbound media with the downloaded bytes", async () => {
@@ -271,127 +221,102 @@ describe("Agents API output attachment publication", () => {
     const output = await collect(client);
 
     expect(await Promise.all(output.map((file) => fs.readFile(file)))).toEqual([binary, text]);
-    expect(output.map((file) => path.dirname(file))).toEqual(Array(2).fill(outboundDir()));
+    expect(output.map((file) => path.dirname(file))).toEqual(Array(2).fill(outboundDir));
     expect((await outboundFiles()).toSorted()).toEqual(
       output.map((file) => path.basename(file)).toSorted(),
     );
   });
 
-  it.each([
-    { name: "an unfinished turn", turnStatus: "in_progress" },
-    { name: "a turn error", turnError: "generation failed" },
-    { name: "a busy session", sessionStatus: "in_progress" },
-  ])("does not publish artifacts from $name", async (options) => {
-    await rejectsWithoutOutput(
-      outputClient([artifact()], {}, options),
-      "requires a completed root turn and idle session",
+  const incompleteTurn = "requires a completed root turn and idle session";
+  it.each<{
+    options?: Parameters<typeof outputClient>[2];
+    patch?: Partial<AgentsApiArtifact>;
+    artifacts?: AgentsApiArtifact[];
+    error?: string;
+  }>([
+    { options: { turnStatus: "in_progress" }, error: incompleteTurn },
+    { options: { turnError: "generation failed" }, error: incompleteTurn },
+    { options: { sessionStatus: "in_progress" }, error: incompleteTurn },
+    { patch: { environment_id: "foreign-environment" } },
+    { patch: { path: "/workspace/outputs/../private.txt" } },
+    { patch: { path: "/workspace/outputs/file\0.txt" } },
+    { patch: { size_bytes: fileLimit + 1 } },
+    {
+      artifacts: Array.from({ length: 51 }, (_, index) => artifact({ id: `file-${index}` })),
+      error: "at most 50 artifacts",
+    },
+    {
+      artifacts: [
+        artifact({ size_bytes: fileLimit }),
+        artifact({ id: "second", size_bytes: fileLimit }),
+        artifact({ id: "third" }),
+      ],
+      error: "10 MiB total",
+    },
+  ])("rejects invalid output inventory %j", async ({ options, patch, artifacts, error }) => {
+    const inventory = artifacts ?? [
+      artifact(),
+      ...(patch ? [artifact({ id: "invalid", ...patch })] : []),
+    ];
+    await expect(collect(outputClient(inventory, {}, options))).rejects.toThrow(
+      error ?? "exceeds its hosted path or 5 MiB file bounds",
     );
+    expect(await outboundFiles()).toEqual([]);
   });
 
   it.each([
-    ["another environment", { environment_id: "foreign-environment" }],
-    ["parent traversal", { path: "/workspace/outputs/../private.txt" }],
-    ["a NUL path", { path: "/workspace/outputs/file\0.txt" }],
-    ["an oversized file", { size_bytes: fileLimit + 1 }],
-  ] satisfies [string, Partial<AgentsApiArtifact>][])(
-    "rejects %s before persisting any output",
-    async (_name, change) => {
-      await rejectsWithoutOutput(
-        outputClient([artifact(), artifact({ id: "invalid", ...change })]),
-        "exceeds its hosted path or 5 MiB file bounds",
-      );
-    },
-  );
-
-  it.each(["count", "bytes"])(
-    "rejects the complete inventory over its %s budget",
-    async (budget) => {
-      const artifacts =
-        budget === "count"
-          ? Array.from({ length: 51 }, (_, index) => artifact({ id: `file-${index}` }))
-          : [
-              artifact({ size_bytes: fileLimit }),
-              artifact({ id: "second", size_bytes: fileLimit }),
-              artifact({ id: "third" }),
-            ];
-      await rejectsWithoutOutput(
-        outputClient(artifacts),
-        budget === "count" ? "at most 50 artifacts" : "10 MiB total",
-      );
-    },
-  );
-
-  it.each(["host", "binding", "abort"] as const)(
-    "rejects %s revocation during media-save preparation before writing output",
-    async (revocation) => {
-      const bytes = Buffer.from("%PDF-1.4\n%%EOF\n");
-      const client = outputClient([outputArtifact("output", "result.pdf", bytes)], {
-        output: bytes,
-      });
-      const controller = new AbortController();
-      const revoked = new Error("fixture transfer authority revoked");
-      let bindingCurrent = true;
-      let reachedSave = false;
-      const assertCurrent = () => {
-        if (!bindingCurrent) {
-          throw revoked;
-        }
-      };
-      const revoke = {
-        host: () => host.closeHost(),
-        binding: () => {
-          bindingCurrent = false;
-        },
-        abort: () => controller.abort(revoked),
-      }[revocation];
-      const detectMime = mediaMime.detectMime;
-      vi.spyOn(mediaMime, "detectMime").mockImplementation(async (params) => {
-        const mime = await detectMime(params);
-        // Revoke inside saveMediaBuffer's awaited MIME preparation, before its final write.
-        if (params.filePath === "result.pdf") {
-          reachedSave = true;
-          revoke();
-        }
-        return mime;
-      });
-      const collecting = collect(client, assertCurrent, controller.signal);
-      if (revocation === "host") {
-        await expect(collecting).rejects.toMatchObject({ name: "AbortError", code: 20 });
-      } else {
-        await expect(collecting).rejects.toBe(revoked);
+    ["host", "save"],
+    ["binding", "save"],
+    ["abort", "save"],
+    ["binding", "download"],
+  ] as const)("revalidates %s during %s", async (revocation, point) => {
+    const bytes = Buffer.from("%PDF-1.4\n%%EOF\n");
+    const controller = new AbortController();
+    const revoked = new Error("fixture transfer authority revoked");
+    let bindingCurrent = true;
+    let reachedSave = false;
+    const assertCurrent = () => {
+      if (!bindingCurrent) {
+        throw revoked;
       }
-      expect(reachedSave).toBe(true);
-      expect(await outboundFiles()).toEqual([]);
-    },
-  );
+    };
+    const revoke = {
+      host: () => host.closeHost(),
+      binding: () => {
+        bindingCurrent = false;
+      },
+      abort: () => controller.abort(revoked),
+    }[revocation];
+    const client = outputClient(
+      [outputArtifact("output", "result.pdf", bytes)],
+      { output: bytes },
+      { onContent: point === "download" ? revoke : undefined },
+    );
+    const detectMime = mediaMime.detectMime;
+    vi.spyOn(mediaMime, "detectMime").mockImplementation(async (params) => {
+      const mime = await detectMime(params);
+      // Revoke inside saveMediaBuffer's awaited MIME preparation, before its final write.
+      if (params.filePath === "result.pdf") {
+        reachedSave = true;
+        revoke();
+      }
+      return mime;
+    });
+    const collecting = collect(client, assertCurrent, controller.signal);
+    if (revocation === "host") {
+      await expect(collecting).rejects.toMatchObject({ name: "AbortError", code: 20 });
+    } else {
+      await expect(collecting).rejects.toBe(revoked);
+    }
+    expect(reachedSave).toBe(point === "save");
+    expect(await outboundFiles()).toEqual([]);
+  });
 
   it("refuses output publication without the host capability", async () => {
     const client = outputClient([artifact()], { output: Buffer.from("x") });
     await expect(
       collectOutputs(client, "session-files", "turn-files", () => {}, signal, undefined),
     ).rejects.toThrow("requires host reply media preparation");
-    expect(await outboundFiles()).toEqual([]);
-  });
-
-  it("revalidates attempt custody after the artifact download and before saving outbound bytes", async () => {
-    let current = true;
-    const revoked = new Error("fixture attempt revoked");
-    const client = outputClient(
-      [artifact()],
-      { output: Buffer.from("x") },
-      {
-        onContent: () => {
-          current = false;
-        },
-      },
-    );
-    await expect(
-      collect(client, () => {
-        if (!current) {
-          throw revoked;
-        }
-      }),
-    ).rejects.toBe(revoked);
     expect(await outboundFiles()).toEqual([]);
   });
 });
@@ -451,26 +376,18 @@ function outputClient(
         throw new Error(`Unexpected fixture request: ${pathname}`);
       }
       options.onContent?.();
-      response = new Response(new Uint8Array(bytes), {
-        headers: { "Content-Type": "application/octet-stream" },
-      });
+      response = new Response(new Uint8Array(bytes));
     }
     return { response, finalUrl: url, release: async () => {} };
   });
   return new AgentsApiClient("fixture-not-a-real-api-key", () => {});
 }
 
-async function outboundFiles(): Promise<string[]> {
-  try {
-    return await fs.readdir(outboundDir());
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+function outboundFiles(): Promise<string[]> {
+  return fs.readdir(outboundDir).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") {
       return [];
     }
     throw error;
-  }
-}
-
-function outboundDir() {
-  return path.join(stateDir, "media", "outbound");
+  });
 }

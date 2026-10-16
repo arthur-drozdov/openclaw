@@ -50,8 +50,13 @@ vi.mock("openclaw/plugin-sdk/agent-harness-runtime", async (importOriginal) => {
 const tempDirs = useSessionStoreTempDirs(afterAll, "agentsapi-completed-reply-");
 const readItems = vi.fn<AgentsApiClient["items"]>();
 const readTurn = vi.fn<AgentsApiClient["turn"]>();
+const promptText = "Create an output file and summarize the result.";
+const steeringText = "Use the updated result.";
+const answerText = "The completed answer.";
+const replyKey = "agentsapi:session-fixture:turn-fixture";
 type SessionOptions = Parameters<typeof createSession>[0];
 type AttemptFixture = Awaited<ReturnType<typeof createAttempt>>;
+type History = Parameters<NonNullable<SessionOptions["onReconcileHistory"]>>[0];
 
 function completedSession(
   options: SessionOptions,
@@ -59,7 +64,7 @@ function completedSession(
   item = completedItem,
   reconciliation?: {
     items?: AgentsApiItem[];
-    history?: Parameters<NonNullable<SessionOptions["onReconcileHistory"]>>[0];
+    history?: History;
   },
 ) {
   return {
@@ -120,24 +125,33 @@ function activeSession(
 
 async function whileRunning(
   fixture: AttemptFixture,
-  started: ReturnType<typeof createDeferred<void>>,
-  finish: ReturnType<typeof createDeferred<void>>,
+  { failure, submitted }: { failure?: Error; submitted?: string[] },
   run: (handle: Parameters<typeof registerRun>[1]) => Promise<void>,
 ) {
+  const started = createDeferred<void>();
+  const finish = createDeferred<void>();
+  const runNative = async (text: string) => {
+    submitted?.push(text);
+    started.resolve();
+    await finish.promise;
+    if (failure) {
+      throw failure;
+    }
+    return completedTurn;
+  };
+  createSession.mockImplementationOnce((options) =>
+    activeSession(options, runNative, failure ? undefined : completedTurn),
+  );
   const attempt = fixture.run();
   try {
     await Promise.race([
       started.promise,
       attempt.then((result) => {
-        throw new Error("Agents API attempt settled before native start", {
-          cause: result.terminal,
-        });
+        throw new Error("Attempt settled before native start", { cause: result.terminal });
       }),
     ]);
     const handle = registerRun.mock.calls.at(-1)?.[1];
-    if (!handle) {
-      throw new Error("Expected the registered Agents API run");
-    }
+    assert(handle, "Expected the registered Agents API run");
     await run(handle);
   } finally {
     finish.resolve();
@@ -218,21 +232,9 @@ describe("Agents API completed reply settlement", () => {
         }),
       ]),
     );
-    const nextTurn = createTurn({ id: "next-native-turn" });
-    const nextItem = {
-      ...completedItem,
-      id: "next-answer",
-      turn_id: nextTurn.id,
-      content: [{ type: "output_text", text: "Follow-up completed." }],
-    };
-    fixture.params.runId = "next-openclaw-run";
-    readTurn.mockResolvedValue(nextTurn);
-    readItems.mockResolvedValue([nextItem]);
-    createSession.mockImplementationOnce((options) =>
-      completedSession(options, nextTurn, nextItem, {
-        history: [{ turn: completedTurn, items: [command, completedItem] }],
-      }),
-    );
+    fixture.completeNext("next-openclaw-run", "Follow-up completed.", [
+      { turn: completedTurn, items: [command, completedItem] },
+    ]);
     const result = await fixture.run();
     expect(result.terminal).toEqual({ kind: "ok" });
     expect(result.assistantTexts).toEqual(["Follow-up completed."]);
@@ -254,13 +256,11 @@ describe("Agents API completed reply settlement", () => {
 
   it("publishes exact committed item identities without acquiring a newer preview", async () => {
     const fixture = await createAttempt();
-    const events: Parameters<NonNullable<AgentHarnessAttemptParamsV2["onAgentEvent"]>>[0][] = [];
+    const events = vi.fn<NonNullable<AgentHarnessAttemptParamsV2["onAgentEvent"]>>();
     const projection = new AgentsApiMessageProjection(
       fixture.params,
       "session-fixture",
-      (event) => {
-        events.push(event);
-      },
+      events,
       () => {},
     );
     const append = transcriptRuntime.appendSessionTranscriptMessageByIdentityStrict;
@@ -287,10 +287,10 @@ describe("Agents API completed reply settlement", () => {
           content: [{ type: "output_text", text: "Still working." }],
         },
       });
-      expect(events.at(-1)).toMatchObject({
+      expect(events.mock.lastCall?.[0]).toMatchObject({
         stream: "assistant",
         data: {
-          itemId: "agentsapi:session-fixture:turn-fixture:newer-preview",
+          itemId: `${replyKey}:newer-preview`,
           text: "Still working.",
         },
       });
@@ -308,17 +308,14 @@ describe("Agents API completed reply settlement", () => {
           messageId: saved.id,
           messageSeq: 1,
           runId: fixture.params.runId,
-          assistantItemIds: [
-            "agentsapi:session-fixture:turn-fixture:answer-fixture",
-            "agentsapi:session-fixture:turn-fixture:reply",
-          ],
+          assistantItemIds: [`${replyKey}:answer-fixture`, `${replyKey}:reply`],
         },
       });
-      expect(events.at(-1)).toMatchObject({
+      expect(events.mock.lastCall?.[0]).toMatchObject({
         stream: "assistant",
         data: {
-          itemId: "agentsapi:session-fixture:turn-fixture:reply",
-          text: "The completed answer.",
+          itemId: `${replyKey}:reply`,
+          text: answerText,
         },
       });
     } finally {
@@ -357,18 +354,16 @@ describe("Agents API completed reply settlement", () => {
         return;
       }
       expect(result).toMatchObject({
-        assistantTexts: ["The completed answer."],
+        assistantTexts: [answerText],
         assistantTranscriptOwned: true,
-        assistantTranscriptIdempotencyKey: "agentsapi:session-fixture:turn-fixture",
+        assistantTranscriptIdempotencyKey: replyKey,
         currentAttemptCompletedAssistant: {
           role: "assistant",
-          content: [{ type: "text", text: "The completed answer." }],
+          content: [{ type: "text", text: answerText }],
           stopReason: "stop",
         },
       });
-      expect(fixture.onPartialReply).toHaveBeenCalledExactlyOnceWith({
-        text: "The completed answer.",
-      });
+      expect(fixture.onPartialReply).toHaveBeenCalledExactlyOnceWith({ text: answerText });
       expect(persisted).toEqual([result.currentAttemptCompletedAssistant]);
       expect(result.messagesSnapshot).toEqual(persisted);
       expect(result.replayMetadata).toEqual({ hadPotentialSideEffects: true, replaySafe: false });
@@ -385,39 +380,15 @@ it("leaves PDF steering uncommitted so its next turn transfers the original in t
       { url: `media://inbound/${saved.id}`, contentType: "application/pdf", fileName: "brief.pdf" },
     ];
     const prompt = "Read the attached brief.";
-    const createRecorder = await loadUserTurnTranscriptRecorderFactoryForTest();
-    const recorder = createRecorder({
-      target: fixture.target,
-      input: { text: prompt, media, idempotencyKey: "pdf-followup" },
-    });
+    const recorder = await fixture.recorder(prompt, "pdf-followup", media);
     allowFollowup();
     const upload = vi
       .spyOn(AgentsApiClient.prototype, "uploadFile")
       .mockResolvedValue({ status: "uploaded" });
-    const started = createDeferred<void>();
-    const finish = createDeferred<void>();
     const submitted: string[] = [];
     const followupTurn = createTurn({ id: "turn-pdf-followup" });
     const followupItem = { ...completedItem, id: "answer-pdf-followup", turn_id: followupTurn.id };
-    let firstTurn = true;
-    createSession.mockImplementation((options) => {
-      const activeTurn = firstTurn;
-      const turn = activeTurn ? completedTurn : followupTurn;
-      firstTurn = false;
-      return activeSession(
-        options,
-        async (text) => {
-          submitted.push(text);
-          if (activeTurn) {
-            started.resolve();
-            await finish.promise;
-          }
-          return turn;
-        },
-        turn,
-      );
-    });
-    const first = await whileRunning(fixture, started, finish, async (handle) => {
+    const first = await whileRunning(fixture, { submitted }, async (handle) => {
       await expect(
         handle.queueMessage(prompt, { media, userTurnTranscriptRecorder: recorder }),
       ).rejects.toThrow("Agents API attachments require a separate turn");
@@ -427,6 +398,16 @@ it("leaves PDF steering uncommitted so its next turn transfers the original in t
 
     readTurn.mockResolvedValue(followupTurn);
     readItems.mockResolvedValue([followupItem]);
+    createSession.mockImplementationOnce((options) =>
+      activeSession(
+        options,
+        async (text) => {
+          submitted.push(text);
+          return followupTurn;
+        },
+        followupTurn,
+      ),
+    );
     fixture.params.runId = "pdf-followup-run";
     fixture.params.prompt = prompt;
     fixture.params.media = media;
@@ -456,28 +437,14 @@ it.each(["same run", "new run", "reset binding", "new budget", "cancelled", "rev
       content: "Earlier request.",
       timestamp: 1,
     });
-    const createRecorder = await loadUserTurnTranscriptRecorderFactoryForTest();
-    const foreground = createRecorder({
-      target: fixture.target,
-      input: { text: fixture.params.prompt, idempotencyKey: "foreground-user" },
-    });
+    const foreground = await fixture.recorder(fixture.params.prompt, "foreground-user");
     await foreground.persistApproved();
     fixture.params.userTurnTranscriptRecorder = foreground;
     fixture.params.toolAuthorityFingerprint = "fixture-steering-authority";
-    const steering = createRecorder({
-      target: fixture.target,
-      input: { text: "Use the updated result.", idempotencyKey: "steering-user" },
-    });
+    const steering = await fixture.recorder(steeringText, "steering-user");
     const histories: unknown[][] = [];
-    const priorHistory = [expect.objectContaining({ role: "user", content: "Earlier request." })];
-    const admittedHistory = [
-      ...priorHistory,
-      expect.objectContaining({
-        role: "user",
-        content: "Create an output file and summarize the result.",
-      }),
-      expect.objectContaining({ role: "user", content: "Use the updated result." }),
-    ];
+    const priorHistory = [userMessage("Earlier request.")];
+    const admittedHistory = [...priorHistory, userMessage(promptText), userMessage(steeringText)];
     const promptHook = vi
       .fn()
       .mockImplementation((event: { messages: Array<{ content: unknown }> }) => {
@@ -491,20 +458,11 @@ it.each(["same run", "new run", "reset binding", "new budget", "cancelled", "rev
       createMockPluginRegistry([{ hookName: "before_prompt_build", handler: promptHook }]),
     );
     allowFollowup();
-    const started = createDeferred<void>();
-    const finish = createDeferred<void>();
     const failure = new Error("fixture provider failure after accepted steering");
-    createSession.mockImplementationOnce((options) =>
-      activeSession(options, async () => {
-        started.resolve();
-        await finish.promise;
-        throw failure;
-      }),
-    );
-    const first = await whileRunning(fixture, started, finish, async (handle) => {
+    const first = await whileRunning(fixture, { failure }, async (handle) => {
       const queue = vi.spyOn(handle, "queueMessage");
       expect(
-        queueAgentHarnessMessage(fixture.params.sessionId, "Use the updated result.", {
+        queueAgentHarnessMessage(fixture.params.sessionId, steeringText, {
           isInboundUserMessage: true,
           toolAuthorityFingerprint: fixture.params.toolAuthorityFingerprint,
           waitForTranscriptCommit: true,
@@ -551,13 +509,11 @@ it.each(["same run", "new run", "reset binding", "new budget", "cancelled", "rev
     // rereads the same fenced prefix instead of reusing the first attempt's history.
     expect(historyReads).toHaveBeenCalledTimes(retryScope === "same run" ? 0 : 1);
     expect(retried.terminal).toEqual({ kind: "ok" });
-    expect(retried.assistantTexts).toEqual(["The completed answer."]);
+    expect(retried.assistantTexts).toEqual([answerText]);
     expect(histories[1]).toEqual(priorHistory);
     expect(promptHook).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({
-        currentUserMessage: "Create an output file and summarize the result.",
-      }),
+      expect.objectContaining({ currentUserMessage: promptText }),
       expect.anything(),
     );
     expect(retried.messagesSnapshot).toEqual([
@@ -565,24 +521,10 @@ it.each(["same run", "new run", "reset binding", "new budget", "cancelled", "rev
       retried.currentAttemptCompletedAssistant,
     ]);
 
-    const nextNativeTurn = createTurn({ id: "turn-next-user" });
-    const nextNativeItem = {
-      ...completedItem,
-      id: "answer-next-user",
-      turn_id: nextNativeTurn.id,
-    };
-    readTurn.mockResolvedValue(nextNativeTurn);
-    readItems.mockResolvedValue([nextNativeItem]);
-    createSession.mockImplementationOnce((options) =>
-      completedSession(options, nextNativeTurn, nextNativeItem),
-    );
-    fixture.params.runId = "next-user-run";
+    fixture.completeNext("next-user-run");
     fixture.params.prompt = "Start the next request.";
     fixture.params.skipPreparedUserTurnMessage = false;
-    const nextTurn = createRecorder({
-      target: fixture.target,
-      input: { text: fixture.params.prompt, idempotencyKey: "next-user" },
-    });
+    const nextTurn = await fixture.recorder(fixture.params.prompt, "next-user");
     await nextTurn.persistApproved();
     fixture.params.userTurnTranscriptRecorder = nextTurn;
     expect((await fixture.run()).terminal).toEqual({ kind: "ok" });
@@ -590,7 +532,7 @@ it.each(["same run", "new run", "reset binding", "new budget", "cancelled", "rev
       ...admittedHistory,
       expect.objectContaining({
         role: "assistant",
-        content: [{ type: "text", text: "The completed answer." }],
+        content: [{ type: "text", text: answerText }],
       }),
     ]);
   },
@@ -627,7 +569,7 @@ async function createAttempt(pluginConfig: unknown = {}) {
     workspaceDir,
     agentDir: workspaceDir,
     config,
-    prompt: "Create an output file and summarize the result.",
+    prompt: promptText,
     timeoutMs: 5_000,
     abortSignal: controller.signal,
     disableTools: true,
@@ -642,6 +584,29 @@ async function createAttempt(pluginConfig: unknown = {}) {
     params,
     controller,
     onPartialReply,
+    completeNext(runId: string, text = answerText, history?: History) {
+      const turn = createTurn({ id: `turn-${runId}` });
+      const item = {
+        ...completedItem,
+        id: `answer-${runId}`,
+        turn_id: turn.id,
+        content: [{ type: "output_text", text }],
+      };
+      params.runId = runId;
+      readTurn.mockResolvedValue(turn);
+      readItems.mockResolvedValue([item]);
+      createSession.mockImplementationOnce((options) =>
+        completedSession(options, turn, item, { history }),
+      );
+    },
+    async recorder(
+      text: string,
+      idempotencyKey: string,
+      media?: AgentHarnessAttemptParamsV2["media"],
+    ) {
+      const create = await loadUserTurnTranscriptRecorderFactoryForTest();
+      return create({ target, input: { text, idempotencyKey, media } });
+    },
     messages: async () =>
       (await SessionManager.openAsync(target, params.workspaceDir)).buildSessionContext().messages,
     resetBinding: () => {
@@ -678,7 +643,7 @@ const completedItem: AgentsApiItem = {
   role: "assistant",
   phase: "final_answer",
   status: "completed",
-  content: [{ type: "output_text", text: "The completed answer." }],
+  content: [{ type: "output_text", text: answerText }],
 };
 
 const hostedSession = createHostedSession();
@@ -690,4 +655,8 @@ function allowFollowup() {
 
 function isNativeCommand(message: Awaited<ReturnType<AttemptFixture["messages"]>>[number]) {
   return "idempotencyKey" in message && String(message.idempotencyKey).includes("native-command");
+}
+
+function userMessage(content: string) {
+  return expect.objectContaining({ role: "user", content });
 }
