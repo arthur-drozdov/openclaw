@@ -9,7 +9,7 @@ import {
 } from "solid-js";
 import { projectProgressCard } from "../../lib/reactive/domain-keyed.ts";
 import { i18nRevision } from "../../lib/reactive/i18n.ts";
-import { projectOwner } from "../../lib/reactive/projection.ts";
+import { projectOwner, projectSource } from "../../lib/reactive/projection.ts";
 import { useVisiblePoll } from "../../lib/reactive/visible-poll.ts";
 import { ChatComposerCapabilityDialogs } from "./chat-composer-capability-host.tsx";
 import { PaneLayout } from "./chat-pane-layout-view.tsx";
@@ -19,6 +19,7 @@ import {
   createChatProviderReview,
   type ChatProviderReviewOwner,
 } from "./chat-provider-review-controller.tsx";
+import { installChatComposerPickerDismissal } from "./components/chat-picker-overlay.ts";
 import { createSolidRenderLifecycle } from "./solid-render-lifecycle.ts";
 
 function MountedChatPaneRuntime(props: { runtime: ChatPaneRuntime }) {
@@ -60,6 +61,14 @@ function MountedChatPaneRuntime(props: { runtime: ChatPaneRuntime }) {
     cacheProgress();
     return stop;
   });
+  const sources = [runtime.context.plugins, runtime.context.navigation].map((source) =>
+    projectSource(source, {
+      read: (owner) => owner,
+      subscribe: (owner, notify) => owner?.subscribe(notify) ?? (() => {}),
+      equality: "revision",
+    }),
+  );
+  onSettled(() => installChatComposerPickerDismissal(runtime.ownerDocument));
   // Relative labels tick only while this retained pane is presented.
   const minutePoll = useVisiblePoll(60_000, () => runtime.requestUpdate());
   const lifecycle = createSolidRenderLifecycle({
@@ -68,6 +77,7 @@ function MountedChatPaneRuntime(props: { runtime: ChatPaneRuntime }) {
     read: () => {
       progress.read();
       i18nRevision();
+      sources.forEach((source) => source.read());
       runtime.prepareRender();
       return runtime.render(() => providerReview);
     },
