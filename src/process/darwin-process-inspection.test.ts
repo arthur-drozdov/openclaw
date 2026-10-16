@@ -26,8 +26,11 @@ beforeEach(() => {
   native.census.mockReturnValue([row]);
 });
 afterEach(() => {
-  if (bunDescriptor) Object.defineProperty(process.versions, "bun", bunDescriptor);
-  else Reflect.deleteProperty(process.versions, "bun");
+  if (bunDescriptor) {
+    Object.defineProperty(process.versions, "bun", bunDescriptor);
+  } else {
+    Reflect.deleteProperty(process.versions, "bun");
+  }
 });
 
 it("uses native identity and arguments without spawning ps under Bun", async () => {
@@ -78,7 +81,9 @@ it("reads start identities only for the requested tree, keeping unrelated users 
   const child = { ...row, pid: 456, ppid: 123 };
   const foreign = { ...row, pid: 789, ppid: 1, uid: 0 };
   native.census.mockImplementation((_timeout, pids, includeStart) => {
-    if (!includeStart) return [row, child, foreign];
+    if (!includeStart) {
+      return [row, child, foreign];
+    }
     expect(pids).not.toContain(foreign.pid);
     return [{ ...row, pid: process.pid }, row, child];
   });

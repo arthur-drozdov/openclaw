@@ -24,8 +24,11 @@ beforeEach(() => {
   Object.defineProperty(process.versions, "bun", { configurable: true, value: undefined });
 });
 afterEach(() => {
-  if (bunDescriptor) Object.defineProperty(process.versions, "bun", bunDescriptor);
-  else Reflect.deleteProperty(process.versions, "bun");
+  if (bunDescriptor) {
+    Object.defineProperty(process.versions, "bun", bunDescriptor);
+  } else {
+    Reflect.deleteProperty(process.versions, "bun");
+  }
 });
 
 const observedProcess: PosixProcess = {

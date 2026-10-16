@@ -39,7 +39,9 @@ beforeEach(() => {
     buffer.writeUInt32LE(123, full ? 100 : 8);
     buffer.writeUInt32LE(pid === 123 ? 2 : 5, full ? 4 : 12);
     buffer.writeUInt32LE(501, full ? 20 : 36);
-    if (full) buffer.writeBigUInt64LE(123456n, 120);
+    if (full) {
+      buffer.writeBigUInt64LE(123456n, 120);
+    }
     return buffer.length;
   });
 });

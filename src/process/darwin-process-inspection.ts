@@ -17,7 +17,9 @@ export class DarwinProcessInspectionError extends Error {
 }
 
 function failure(cause: unknown): DarwinProcessInspectionError {
-  if (cause instanceof DarwinProcessInspectionError) return cause;
+  if (cause instanceof DarwinProcessInspectionError) {
+    return cause;
+  }
   const code = cause && typeof cause === "object" && "code" in cause ? cause.code : undefined;
   return new DarwinProcessInspectionError(
     code === "ETIMEDOUT" || code === "ABORT_ERR" || code === "timeout"
@@ -31,7 +33,9 @@ function failure(cause: unknown): DarwinProcessInspectionError {
 
 function remaining(deadline: number): number {
   const ms = Math.floor(deadline - performance.now());
-  if (ms <= 0) throw new DarwinProcessInspectionError("deadline");
+  if (ms <= 0) {
+    throw new DarwinProcessInspectionError("deadline");
+  }
   return ms;
 }
 
@@ -47,7 +51,9 @@ function parse(output: string): DarwinProcess[] {
     .filter((line) => line.trim())
     .map((line) => {
       const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(-?\d+)\s+(.+?)\s*$/.exec(line);
-      if (!match) throw new DarwinProcessInspectionError("unavailable");
+      if (!match) {
+        throw new DarwinProcessInspectionError("unavailable");
+      }
       if (!match.slice(1, 4).every((value) => Number.isSafeInteger(Number(value)))) {
         throw new DarwinProcessInspectionError("unavailable");
       }
@@ -65,8 +71,17 @@ function parse(output: string): DarwinProcess[] {
 function nativeCensus(deadline: number, pids?: readonly number[]): DarwinProcess[] {
   try {
     const rows = [...readDarwinBunProcessCensus(remaining(deadline), pids, true)].map((row) => {
-      if (!row.startedAt) throw new DarwinProcessInspectionError("unavailable");
-      return { ...row, startedAt: row.startedAt };
+      if (!row.startedAt) {
+        throw new DarwinProcessInspectionError("unavailable");
+      }
+      return {
+        pid: row.pid,
+        ppid: row.ppid,
+        pgid: row.pgid,
+        state: row.state,
+        uid: row.uid,
+        startedAt: row.startedAt,
+      };
     });
     remaining(deadline);
     return rows;
@@ -82,12 +97,18 @@ async function ps(args: string[], deadline: number): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
     let settled = false;
     const settle = (cause: unknown, output = "") => {
-      if (settled) return;
+      if (settled) {
+        return;
+      }
       settled = true;
       clearTimeout(timer);
-      if (performance.now() >= deadline) reject(new DarwinProcessInspectionError("deadline"));
-      else if (cause) reject(failure(cause));
-      else resolve(output);
+      if (performance.now() >= deadline) {
+        reject(new DarwinProcessInspectionError("deadline"));
+      } else if (cause) {
+        reject(failure(cause));
+      } else {
+        resolve(output);
+      }
     };
     const child = execFile(
       "ps",
@@ -116,8 +137,12 @@ export async function readDarwinProcessSnapshot(
   if (pids?.some((pid) => !Number.isInteger(pid) || pid <= 0 || pid > 0x7fff_ffff)) {
     throw new DarwinProcessInspectionError("unavailable");
   }
-  if (pids?.length === 0) return [];
-  if (process.versions.bun) return nativeCensus(deadline, pids);
+  if (pids?.length === 0) {
+    return [];
+  }
+  if (process.versions.bun) {
+    return nativeCensus(deadline, pids);
+  }
   // ps exits 1 when no requested PIDs remain. A readable observer distinguishes
   // that ordinary absence from failed inspection without accepting exit errors.
   const selected = pids ? [...new Set([process.pid, ...pids])] : undefined;
@@ -172,10 +197,14 @@ export function* readDarwinProcessCensus(timeoutMs: number): Generator<DarwinCen
     env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
   });
   remaining(deadline);
-  if (result.error || result.status !== 0) throw failure(result.error);
+  if (result.error || result.status !== 0) {
+    throw failure(result.error);
+  }
   for (const row of parse(result.stdout)) {
     remaining(deadline);
-    if (row.pid !== result.pid) yield row;
+    if (row.pid !== result.pid) {
+      yield row;
+    }
   }
   remaining(deadline);
 }
@@ -183,8 +212,9 @@ export function* readDarwinProcessCensus(timeoutMs: number): Generator<DarwinCen
 /** Arguments only: never request or return process environment values. */
 export async function readDarwinProcessCommand(pid: number, deadline: number): Promise<string> {
   remaining(deadline);
-  if (!process.versions.bun)
+  if (!process.versions.bun) {
     return (await ps(["-o", "command=", "-p", String(pid)], deadline)).split("\n")[0]?.trim() ?? "";
+  }
   try {
     const { readProcessCommand } = await import("@openclaw/proc-safe/inspect");
     remaining(deadline);
