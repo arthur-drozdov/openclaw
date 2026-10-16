@@ -90,6 +90,15 @@ function channelConfig(): OpenClawConfig {
   };
 }
 
+type ChannelArgs = [OpenClawConfig, unknown, WizardPrompter, SetupChannelsOptions];
+type ChatSetupArgs = [OpenClawConfig, WizardPrompter, SetupChannelsOptions];
+
+function useChannelSetup(setup: (...args: ChatSetupArgs) => Promise<OpenClawConfig>) {
+  mocks.setupChannels.mockImplementation((...[config, , prompter, options]: ChannelArgs) =>
+    setup(config, prompter, options),
+  );
+}
+
 describe("SystemAgentChatEngine runtime", () => {
   it.each(["disposed", "completed"] as const)(
     "retires retained channel write authority after hosted setup is %s",
@@ -101,19 +110,12 @@ describe("SystemAgentChatEngine runtime", () => {
         sourceConfig: {},
       });
       useConfigWriter();
-      mocks.setupChannels.mockImplementation(
-        async (
-          config: OpenClawConfig,
-          _runtime: unknown,
-          prompter: WizardPrompter,
-          options: SetupChannelsOptions,
-        ) => {
-          retainedOptions = options;
-          await options.beforePersistentEffect?.();
-          await prompter.text({ message: "Waiting for channel login" });
-          return config;
-        },
-      );
+      useChannelSetup(async (config, prompter, options) => {
+        retainedOptions = options;
+        await options.beforePersistentEffect?.();
+        await prompter.text({ message: "Waiting for channel login" });
+        return config;
+      });
       const host = new ChatWizardHost({
         surface: "gateway",
         beforePersistentApply: prepare,
@@ -394,24 +396,30 @@ describe("SystemAgentChatEngine runtime", () => {
     expect(mocks.writeWizardConfigFile).not.toHaveBeenCalled();
   });
 
-  it("hands CLI Gateway credentials to the masked terminal wizard", async () => {
-    const engine = createEngine({
-      surface: "cli",
-      runGatewaySetupWizard: async (prompter) => {
-        await prompter.text({ message: "Gateway token", sensitive: true });
-      },
-    });
-
-    const stopped = await engine.handle("configure gateway");
-    expect(stopped.text).toContain("Sensitive input is not accepted");
-    expect(stopped.text).toContain("open gateway wizard");
-    expect(stopped.text).toContain("openclaw configure --section gateway");
-    expect(stopped.sensitive).toBeUndefined();
-
-    const handoff = await engine.handle("open gateway wizard");
-    expect(handoff.action).toBe("open-setup");
-    expect(handoff.handoff).toEqual({ kind: "open-setup", target: "gateway" });
-  });
+  it.each([
+    ["gateway", "runGatewaySetupWizard", "Gateway token"],
+    ["search", "runSearchSetupWizard", "Provider API key"],
+  ] as const)(
+    "hands CLI %s credentials to the masked terminal wizard",
+    async (target, wizard, message) => {
+      const engine = createEngine({
+        surface: "cli",
+        [wizard]: async (prompter: WizardPrompter) => {
+          await prompter.text({ message, sensitive: true });
+        },
+      });
+      const stopped = await engine.handle(`configure ${target}`);
+      expect(stopped.text).toContain("Sensitive input is not accepted");
+      expect(stopped.text).toContain(`open ${target} wizard`);
+      if (target === "gateway") {
+        expect(stopped.text).toContain("openclaw configure --section gateway");
+      }
+      expect(stopped.sensitive).toBeUndefined();
+      const handoff = await engine.handle(`open ${target} wizard`);
+      expect(handoff.action).toBe("open-setup");
+      expect(handoff.handoff).toEqual({ kind: "open-setup", target });
+    },
+  );
 
   it("reports a failed hosted search-provider install without writing or auditing", async () => {
     const baseConfig: OpenClawConfig = {};
@@ -433,24 +441,6 @@ describe("SystemAgentChatEngine runtime", () => {
     expect(reply.text).not.toContain("Done — web search setup is complete");
     expect(mocks.writeWizardConfigFile).not.toHaveBeenCalled();
     expect(appendAuditEntry).not.toHaveBeenCalled();
-  });
-
-  it("hands CLI search credentials to the masked terminal wizard", async () => {
-    const engine = createEngine({
-      surface: "cli",
-      runSearchSetupWizard: async (prompter) => {
-        await prompter.text({ message: "Provider API key", sensitive: true });
-      },
-    });
-
-    const stopped = await engine.handle("configure search");
-    expect(stopped.text).toContain("Sensitive input is not accepted");
-    expect(stopped.text).toContain("open search wizard");
-    expect(stopped.sensitive).toBeUndefined();
-
-    const handoff = await engine.handle("open search wizard");
-    expect(handoff.action).toBe("open-setup");
-    expect(handoff.handoff).toEqual({ kind: "open-setup", target: "search" });
   });
 
   it("does not promise Doctor will repair every invalid channel setup config", async () => {
@@ -508,18 +498,16 @@ describe("SystemAgentChatEngine runtime", () => {
       sourceConfig: structuredClone(currentConfig),
       issues: [],
     }));
-    mocks.setupChannels.mockImplementation(
-      async (config: OpenClawConfig, _runtime: unknown, prompter: WizardPrompter) => {
-        const token = await prompter.text({ message: "Bot token" });
-        return {
-          ...config,
-          channels: {
-            ...config.channels,
-            telegram: { botToken: token },
-          },
-        };
-      },
-    );
+    useChannelSetup(async (config, prompter) => {
+      const token = await prompter.text({ message: "Bot token" });
+      return {
+        ...config,
+        channels: {
+          ...config.channels,
+          telegram: { botToken: token },
+        },
+      };
+    });
     mocks.writeWizardConfigFile.mockImplementation(
       async (nextConfig: OpenClawConfig, opts: { baseHash?: string }) => {
         if (opts.baseHash !== currentHash) {
@@ -559,93 +547,60 @@ describe("SystemAgentChatEngine runtime", () => {
     expect(currentConfig).toEqual(concurrentConfig);
   });
 
-  it("rechecks inference authority immediately before a hosted channel write", async () => {
-    useTempStateDir();
-    const baseConfig = channelConfig();
-    const changedConfig: OpenClawConfig = {
-      agents: { defaults: { model: { primary: "anthropic/claude-opus-4-8" } } },
-    };
-    const verifiedInference = await createAmbientVerifiedBinding(baseConfig);
-    let currentConfig = structuredClone(baseConfig);
-    mocks.readSetupConfigFileSnapshot.mockResolvedValue({
-      ...setupSnapshot(structuredClone(baseConfig), "base-hash"),
-      sourceConfig: structuredClone(baseConfig),
-      path: "/tmp/openclaw.json",
-      issues: [],
-    });
-    mocks.setupChannels.mockImplementation(
-      async (config: OpenClawConfig, _runtime: unknown, prompter: WizardPrompter) => {
+  it.each(["write", "post-write hooks"] as const)(
+    "rechecks inference authority before hosted channel %s",
+    async (phase) => {
+      useTempStateDir();
+      const baseConfig = channelConfig();
+      const changedConfig: OpenClawConfig = {
+        agents: { defaults: { model: { primary: "anthropic/claude-opus-4-8" } } },
+      };
+      const verifiedInference = await createAmbientVerifiedBinding(baseConfig);
+      let currentConfig = structuredClone(baseConfig);
+      const hook = { channel: "telegram", accountId: "default", run: vi.fn() };
+      mocks.readSetupConfigFileSnapshot.mockResolvedValue({
+        ...setupSnapshot(structuredClone(baseConfig), "base-hash"),
+        sourceConfig: structuredClone(baseConfig),
+        path: "/tmp/openclaw.json",
+        issues: [],
+      });
+      useChannelSetup(async (config, prompter, options) => {
         const token = await prompter.text({ message: "Bot token" });
-        currentConfig = structuredClone(changedConfig);
+        if (phase === "write") {
+          currentConfig = structuredClone(changedConfig);
+        } else {
+          options.onPostWriteHook?.(hook);
+        }
         return {
           ...config,
           channels: { telegram: { botToken: token } },
         };
-      },
-    );
-    useConfigWriter();
-    const engine = createEngine({
-      surface: "gateway",
-      verifiedInference,
-      deps: {
-        readConfigFileSnapshot: vi.fn(async () => configSnapshot(currentConfig)) as never,
-      },
-    });
+      });
+      mocks.writeWizardConfigFile.mockImplementation(async (config: OpenClawConfig) => {
+        if (phase === "post-write hooks") {
+          currentConfig = structuredClone(changedConfig);
+        }
+        return hostedConfigFiles.write(config);
+      });
+      const engine = createEngine({
+        surface: "gateway",
+        verifiedInference,
+        deps: {
+          readConfigFileSnapshot: vi.fn(async () => configSnapshot(currentConfig)) as never,
+        },
+      });
 
-    const stopped = await replyWithToken(engine);
+      const stopped = await replyWithToken(engine);
 
-    expect(stopped.text).toContain("Telegram setup stopped");
-    expect(mocks.writeWizardConfigFile).not.toHaveBeenCalled();
-  });
-
-  it("rechecks inference authority before hosted channel post-write hooks", async () => {
-    useTempStateDir();
-    const baseConfig = channelConfig();
-    const changedConfig: OpenClawConfig = {
-      agents: { defaults: { model: { primary: "anthropic/claude-opus-4-8" } } },
-    };
-    const verifiedInference = await createAmbientVerifiedBinding(baseConfig);
-    let currentConfig = structuredClone(baseConfig);
-    const hook = { channel: "telegram", accountId: "default", run: vi.fn() };
-    mocks.readSetupConfigFileSnapshot.mockResolvedValue({
-      ...setupSnapshot(structuredClone(baseConfig), "base-hash"),
-      sourceConfig: structuredClone(baseConfig),
-      path: "/tmp/openclaw.json",
-      issues: [],
-    });
-    mocks.setupChannels.mockImplementation(
-      async (
-        config: OpenClawConfig,
-        _runtime: unknown,
-        prompter: WizardPrompter,
-        options: { onPostWriteHook?: (hook: unknown) => void },
-      ) => {
-        const token = await prompter.text({ message: "Bot token" });
-        options.onPostWriteHook?.(hook);
-        return {
-          ...config,
-          channels: { telegram: { botToken: token } },
-        };
-      },
-    );
-    mocks.writeWizardConfigFile.mockImplementation(async (config: OpenClawConfig) => {
-      currentConfig = structuredClone(changedConfig);
-      return hostedConfigFiles.write(config);
-    });
-    const engine = createEngine({
-      surface: "gateway",
-      verifiedInference,
-      deps: {
-        readConfigFileSnapshot: vi.fn(async () => configSnapshot(currentConfig)) as never,
-      },
-    });
-
-    const stopped = await replyWithToken(engine);
-
-    expect(stopped.text).toContain("Telegram setup stopped");
-    expect(mocks.writeWizardConfigFile).toHaveBeenCalledOnce();
-    expect(hook.run).not.toHaveBeenCalled();
-  });
+      expect(stopped.text).toContain("Telegram setup stopped");
+      if (phase === "write") {
+        expect(mocks.writeWizardConfigFile).not.toHaveBeenCalled();
+      } else {
+        expect(mocks.writeWizardConfigFile).toHaveBeenCalledOnce();
+        expect(hook.run).not.toHaveBeenCalled();
+      }
+    },
+  );
 });
 
 describe("hosted channel post-write hooks", () => {
@@ -721,32 +676,25 @@ describe("hosted channel post-write hooks", () => {
       });
       return setupSnapshot(baseConfig, "setup-base-hash");
     });
-    mocks.setupChannels.mockImplementation(
-      async (
-        config: OpenClawConfig,
-        _runtime: unknown,
-        _prompter: WizardPrompter,
-        options: { onPostWriteHook?: (value: typeof hook) => void },
-      ) => {
-        recordPhase("setup");
-        await withCommandPluginMetadata({ config }, () => {
-          expect(readAccount(config, "work-phone")).toBeUndefined();
-        });
-        await withPluginLifecycleLease({ env: fixture.env }, async () => {
-          fixture.installPolicy();
-        });
-        recordPhase("installed");
-        options.onPostWriteHook?.(hook);
-        return await withCommandPluginMetadata({ config }, () =>
-          applyAccountNameToChannelSection({
-            cfg: config,
-            channelKey: "signal",
-            accountId: "work-phone",
-            name: "Work calls",
-          }),
-        );
-      },
-    );
+    useChannelSetup(async (config, _prompter, options) => {
+      recordPhase("setup");
+      await withCommandPluginMetadata({ config }, () => {
+        expect(readAccount(config, "work-phone")).toBeUndefined();
+      });
+      await withPluginLifecycleLease({ env: fixture.env }, async () => {
+        fixture.installPolicy();
+      });
+      recordPhase("installed");
+      options.onPostWriteHook?.(hook);
+      return await withCommandPluginMetadata({ config }, () =>
+        applyAccountNameToChannelSection({
+          cfg: config,
+          channelKey: "signal",
+          accountId: "work-phone",
+          name: "Work calls",
+        }),
+      );
+    });
     mocks.writeWizardConfigFile.mockImplementation(async (config: OpenClawConfig) => {
       recordPhase("write");
       expect(config.channels?.signal?.accounts).toEqual({
