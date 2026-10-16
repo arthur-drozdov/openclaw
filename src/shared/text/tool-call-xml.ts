@@ -293,6 +293,11 @@ function stripToolCallXmlTagsInternal(
   ) {
     return text;
   }
+  // A lone unfinished transport opener is not a visible answer. Keep quoted,
+  // fenced and explanatory examples intact; this exact bare form has no prose.
+  if (/^\s*<tool_call>\s*$/i.test(text)) {
+    return "";
+  }
 
   const codeRegions = resolveCodeRegions(text);
   let result = "";
