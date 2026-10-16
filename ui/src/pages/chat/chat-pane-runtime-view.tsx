@@ -7,6 +7,7 @@ import {
   Show,
   untrack,
 } from "solid-js";
+import { nativeGatewaysCapability } from "../../app/native-gateways.runtime.ts";
 import { i18nRevision } from "../../lib/reactive/i18n.ts";
 import { projectSource } from "../../lib/reactive/projection.ts";
 import { useVisiblePoll } from "../../lib/reactive/visible-poll.ts";
@@ -25,7 +26,11 @@ function MountedChatPaneRuntime(props: { runtime: ChatPaneRuntime }) {
   const runtime = untrack(() => props.runtime);
   runtime.mountPanelActions();
   runtime.mountToolIcons();
-  const sources = [runtime.context.plugins, runtime.context.navigation].map((source) =>
+  const sources = [
+    runtime.context.plugins,
+    runtime.context.navigation,
+    nativeGatewaysCapability(),
+  ].map((source) =>
     projectSource(source, {
       read: (owner) => owner,
       subscribe: (owner, notify) => owner?.subscribe(notify) ?? (() => {}),
