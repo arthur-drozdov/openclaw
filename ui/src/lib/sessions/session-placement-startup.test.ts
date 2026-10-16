@@ -76,35 +76,19 @@ function expectNotSent(request: ReturnType<typeof vi.fn>) {
 
 describe("session placement startup", () => {
   it.each([
-    {
-      name: "profile",
-      target: {
-        kind: "profile",
-        profileId: "aws",
-        os: "windows/wsl2",
-        machineClass: "fast",
-      } as const,
-      expectedTarget: { profileId: "aws", os: "windows/wsl2", machineClass: "fast" },
-    },
-    {
-      name: "device",
-      target: { kind: "device", deviceId: "device-1" } as const,
-      expectedTarget: { deviceId: "device-1" },
-    },
-    {
-      name: "automatic device",
-      target: { kind: "auto-device" } as const,
-      expectedTarget: { autoDevice: true },
-    },
-  ])("serializes a $name target to the flat dispatch contract", async (testCase) => {
+    [
+      { kind: "profile", profileId: "aws", os: "windows/wsl2", machineClass: "fast" },
+      { profileId: "aws", os: "windows/wsl2", machineClass: "fast" },
+    ],
+    [{ kind: "device", deviceId: "device-1" }, { deviceId: "device-1" }],
+    [{ kind: "auto-device" }, { autoDevice: true }],
+  ] as const)("serializes %j to the flat dispatch contract", async (target, expectedTarget) => {
     const request = replies(placement("active", "worker"), { runId: "run-target" });
 
-    await expect(start(request, { target: testCase.target })).resolves.toMatchObject({
-      status: "started",
-    });
+    await expect(start(request, { target })).resolves.toMatchObject({ status: "started" });
     expect(request).toHaveBeenNthCalledWith(1, "sessions.dispatch", {
       ...targetKey,
-      ...testCase.expectedTarget,
+      ...expectedTarget,
     });
   });
 
@@ -177,34 +161,30 @@ describe("session placement startup", () => {
   });
 
   it("continues provisioning after a Gateway restart without reclaiming the worker", async () => {
-    vi.useFakeTimers();
-    try {
-      let unavailableReads = 0;
-      const request = vi.fn(async (method: string) => {
-        if (method === "sessions.dispatch") {
-          return { placement: { state: "provisioning" } };
+    fakeTimers();
+    let unavailableReads = 0;
+    const request = vi.fn(async (method: string) => {
+      if (method === "sessions.dispatch") {
+        return { placement: { state: "provisioning" } };
+      }
+      if (method === "sessions.describe") {
+        if (unavailableReads++ < 8) {
+          throw new GatewayRequestError({
+            code: "UNAVAILABLE",
+            message: "Gateway temporarily unavailable",
+            retryable: true,
+            details: { reason: "gateway-restarting" },
+          });
         }
-        if (method === "sessions.describe") {
-          if (unavailableReads++ < 8) {
-            throw new GatewayRequestError({
-              code: "UNAVAILABLE",
-              message: "Gateway temporarily unavailable",
-              retryable: true,
-              details: { reason: "gateway-restarting" },
-            });
-          }
-          return { session: { placement: { state: "active" } } };
-        }
-        return { status: "started" };
-      });
-      const outcome = start(request);
-      await vi.runAllTimersAsync();
-      await expect(outcome).resolves.toMatchObject({ status: "started" });
-      expect(request).not.toHaveBeenCalledWith("sessions.reclaim", expect.anything());
-      expect(request.mock.calls.filter(([method]) => method === "sessions.send")).toHaveLength(1);
-    } finally {
-      vi.useRealTimers();
-    }
+        return { session: { placement: { state: "active" } } };
+      }
+      return { status: "started" };
+    });
+    const outcome = start(request);
+    await vi.runAllTimersAsync();
+    await expect(outcome).resolves.toMatchObject({ status: "started" });
+    expect(request).not.toHaveBeenCalledWith("sessions.reclaim", expect.anything());
+    expect(request.mock.calls.filter(([method]) => method === "sessions.send")).toHaveLength(1);
   });
 
   it.each([
@@ -219,69 +199,61 @@ describe("session placement startup", () => {
       expectedError: "session placement could not be verified; cleanup failed: cleanup unavailable",
     },
   ])("$name when placement lookups remain unavailable", async ({ cleanupError, expectedError }) => {
-    vi.useFakeTimers();
-    try {
-      const request = replies(
-        placement("provisioning", "environment-unavailable"),
-        new Error("lookup unavailable 1"),
-        new Error("lookup unavailable 2"),
-        new Error("lookup unavailable 3"),
-        new Error("lookup unavailable 4"),
-      );
-      if (cleanupError) {
-        request.mockRejectedValueOnce(new Error(cleanupError));
-      } else {
-        request.mockResolvedValueOnce({ worker: { state: "destroyed" } });
-      }
-
-      const outcome = start(request);
-      await vi.runAllTimersAsync();
-
-      await expect(outcome).resolves.toEqual({ status: "cleanup-rejected", error: expectedError });
-      expect(request).toHaveBeenCalledTimes(6);
-      expectReclaim(request, 6);
-      expect(request).not.toHaveBeenCalledWith("sessions.abort", expect.anything());
-    } finally {
-      vi.useRealTimers();
+    fakeTimers();
+    const request = replies(
+      placement("provisioning", "environment-unavailable"),
+      new Error("lookup unavailable 1"),
+      new Error("lookup unavailable 2"),
+      new Error("lookup unavailable 3"),
+      new Error("lookup unavailable 4"),
+    );
+    if (cleanupError) {
+      request.mockRejectedValueOnce(new Error(cleanupError));
+    } else {
+      request.mockResolvedValueOnce({ worker: { state: "destroyed" } });
     }
+
+    const outcome = start(request);
+    await vi.runAllTimersAsync();
+
+    await expect(outcome).resolves.toEqual({ status: "cleanup-rejected", error: expectedError });
+    expect(request).toHaveBeenCalledTimes(6);
+    expectReclaim(request, 6);
+    expect(request).not.toHaveBeenCalledWith("sessions.abort", expect.anything());
   });
 
   it.each(["pending", "pending then unavailable"] as const)(
     "explains an unfinished placement without discarding it when the Gateway is %s",
     async (observation) => {
-      vi.useFakeTimers();
-      try {
-        const pending = { state: "provisioning", environmentId: "environment-slow" };
-        const request = vi.fn();
-        if (observation === "pending") {
-          request.mockResolvedValue({ session: { placement: pending } });
-        } else {
-          request.mockRejectedValue(
-            new GatewayRequestError({
-              code: "UNAVAILABLE",
-              message: "gateway restarting",
-              retryable: true,
-              details: { reason: "gateway-restarting" },
-            }),
-          );
-        }
-        request.mockResolvedValueOnce({ session: { placement: pending } });
-
-        const outcome = start(request, { mode: "recover" });
-        await vi.runAllTimersAsync();
-        await expect(outcome).resolves.toEqual({
-          status: "cleanup-rejected",
-          error:
-            observation === "pending"
-              ? "Worker setup is still in progress. Retry to check the existing worker; your message has not been sent."
-              : "Could not confirm whether worker setup finished. Retry to check again; your message has not been sent.",
-        });
-        expect(request).not.toHaveBeenCalledWith("sessions.reclaim", expect.anything());
-        expectNotSent(request);
-        expect(request).not.toHaveBeenCalledWith("sessions.dispatch", expect.anything());
-      } finally {
-        vi.useRealTimers();
+      fakeTimers();
+      const pending = { state: "provisioning", environmentId: "environment-slow" };
+      const request = vi.fn();
+      if (observation === "pending") {
+        request.mockResolvedValue({ session: { placement: pending } });
+      } else {
+        request.mockRejectedValue(
+          new GatewayRequestError({
+            code: "UNAVAILABLE",
+            message: "gateway restarting",
+            retryable: true,
+            details: { reason: "gateway-restarting" },
+          }),
+        );
       }
+      request.mockResolvedValueOnce({ session: { placement: pending } });
+
+      const outcome = start(request, { mode: "recover" });
+      await vi.runAllTimersAsync();
+      await expect(outcome).resolves.toEqual({
+        status: "cleanup-rejected",
+        error:
+          observation === "pending"
+            ? "Worker setup is still in progress. Retry to check the existing worker; your message has not been sent."
+            : "Could not confirm whether worker setup finished. Retry to check again; your message has not been sent.",
+      });
+      expect(request).not.toHaveBeenCalledWith("sessions.reclaim", expect.anything());
+      expectNotSent(request);
+      expect(request).not.toHaveBeenCalledWith("sessions.dispatch", expect.anything());
     },
   );
 
@@ -296,37 +268,26 @@ describe("session placement startup", () => {
     expectNotSent(request);
   });
 
-  it("reclaims by session when cancellation coincides with a lookup failure", async () => {
-    fakeTimers();
-    let current = true;
-    const request = replies(placement("provisioning"))
-      .mockImplementationOnce(async () => {
-        current = false;
-        throw new Error("reconnecting");
-      })
-      .mockResolvedValueOnce({ ok: true });
-
-    const outcome = start(request, {}, () => current);
-    await vi.runAllTimersAsync();
-    await expect(outcome).resolves.toEqual({ status: "cancelled" });
-    expectReclaim(request, 3);
-  });
-
-  it("reclaims without carrying an environment identity", async () => {
-    fakeTimers();
-    let current = true;
-    const request = replies(placement("provisioning"))
-      .mockImplementationOnce(async () => {
-        current = false;
-        return { session: { placement: { state: "provisioning" } } };
-      })
-      .mockResolvedValueOnce({ ok: true });
-
-    const outcome = start(request, {}, () => current);
-    await vi.runAllTimersAsync();
-    await expect(outcome).resolves.toEqual({ status: "cancelled" });
-    expectReclaim(request, 3);
-  });
+  it.each(["lookup failure", "missing environment"] as const)(
+    "reclaims by session when cancellation coincides with %s",
+    async (observation) => {
+      fakeTimers();
+      let current = true;
+      const request = replies(placement("provisioning"))
+        .mockImplementationOnce(async () => {
+          current = false;
+          if (observation === "lookup failure") {
+            throw new Error("reconnecting");
+          }
+          return { session: { placement: { state: "provisioning" } } };
+        })
+        .mockResolvedValueOnce({ ok: true });
+      const outcome = start(request, {}, () => current);
+      await vi.runAllTimersAsync();
+      await expect(outcome).resolves.toEqual({ status: "cancelled" });
+      expectReclaim(request, 3);
+    },
+  );
 
   it("keeps the accepted message identity when post-send cleanup fails", async () => {
     let current = true;
@@ -369,12 +330,7 @@ describe("session placement startup", () => {
     const request = replies(placement("active"), { ok: true });
 
     await expect(
-      start(
-        request,
-        { messageId: "message-retained" },
-        () => true,
-        () => false,
-      ),
+      start(request, { messageId: "message-retained" }, undefined, () => false),
     ).resolves.toEqual({
       status: "send-not-started",
       messageId: "message-retained",
@@ -409,45 +365,35 @@ describe("session placement startup", () => {
     ]);
   });
 
-  it("unarchives a local draft after a delete no-op", async () => {
-    const request = vi.fn(async (method: string) => {
-      if (method === "sessions.describe") {
-        return { session: { sessionId: "session-draft" } };
+  it.each([false, true])(
+    "reports local draft cleanup failure (restore rejected: %s)",
+    async (restoreFails) => {
+      const request = replies(
+        { session: { sessionId: "session-draft" } },
+        { ok: true },
+        restoreFails ? new Error("delete unavailable") : { ok: true, deleted: false },
+        restoreFails ? new Error("restore unavailable") : { ok: true },
+      );
+      await expect(deleteDraft(request)).resolves.toBe(
+        restoreFails
+          ? "delete unavailable; restoring the placement draft failed: restore unavailable"
+          : "placement draft session was not deleted",
+      );
+      expect(request.mock.calls.map(([method]) => method)).toEqual([
+        "sessions.describe",
+        "sessions.patch",
+        "sessions.delete",
+        "sessions.patch",
+      ]);
+      if (!restoreFails) {
+        expect(request).toHaveBeenLastCalledWith("sessions.patch", {
+          ...targetKey,
+          archived: false,
+          expectedSessionId: "session-draft",
+        });
       }
-      if (method === "sessions.delete") {
-        return { ok: true, deleted: false };
-      }
-      return { ok: true };
-    });
-
-    await expect(deleteDraft(request)).resolves.toBe("placement draft session was not deleted");
-    expect(request).toHaveBeenLastCalledWith("sessions.patch", {
-      ...targetKey,
-      archived: false,
-      expectedSessionId: "session-draft",
-    });
-  });
-
-  it("reports both delete and restore failures during local draft cleanup", async () => {
-    let patchCalls = 0;
-    const request = vi.fn(async (method: string) => {
-      if (method === "sessions.describe") {
-        return { session: { sessionId: "session-draft" } };
-      }
-      if (method === "sessions.delete") {
-        throw new Error("delete unavailable");
-      }
-      patchCalls += 1;
-      if (patchCalls === 2) {
-        throw new Error("restore unavailable");
-      }
-      return { ok: true };
-    });
-
-    await expect(deleteDraft(request)).resolves.toBe(
-      "delete unavailable; restoring the placement draft failed: restore unavailable",
-    );
-  });
+    },
+  );
 
   it("reclaims a recovered worker before archiving and deleting its draft session", async () => {
     const request = replies(
@@ -467,21 +413,8 @@ describe("session placement startup", () => {
     expect(request.mock.calls).toEqual([
       ["sessions.describe", { key: params.key }],
       ["sessions.reclaim", { key: params.key, agentId: params.agentId }],
-      [
-        "sessions.patch",
-        {
-          ...draftTarget,
-          archived: true,
-        },
-      ],
-      [
-        "sessions.delete",
-        {
-          ...draftTarget,
-          deleteTranscript: true,
-          archivedOnly: true,
-        },
-      ],
+      ["sessions.patch", { ...draftTarget, archived: true }],
+      ["sessions.delete", { ...draftTarget, deleteTranscript: true, archivedOnly: true }],
     ]);
   });
 

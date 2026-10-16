@@ -42,6 +42,7 @@ function harness(
   return {
     ...capability,
     calls: () => listCalls,
+    mode: () => capability.sessions.state.result?.sessions[0]?.permissionMode,
     message: (
       key: string,
       sessionId: string,
@@ -74,7 +75,7 @@ it.each(["workspace", "full", "failure"] as const)(
     const initial = sessionsResult([row(key, sessionId)], 1);
     const read = createDeferred<SessionsListResult>();
     const reply = createDeferred<unknown>();
-    const { sessions, calls, message } = harness(initial, reply.promise, () => read.promise);
+    const { sessions, calls, message, mode } = harness(initial, reply.promise, () => read.promise);
     let patch: ReturnType<typeof sessions.patch> | undefined;
     try {
       await sessions.refresh({ force: true });
@@ -82,7 +83,7 @@ it.each(["workspace", "full", "failure"] as const)(
       message(key, sessionId, 2);
       reply.resolve(acknowledgment(key, sessionId));
       await vi.waitFor(() => expect(calls()).toBe(2));
-      expect(sessions.state.result?.sessions[0]?.permissionMode).toBe("full");
+      expect(mode()).toBe("full");
       if (canonical === "failure") {
         read.reject(new Error("Canonical read unavailable"));
         await expect(patch).resolves.toMatchObject({
@@ -94,9 +95,7 @@ it.each(["workspace", "full", "failure"] as const)(
         );
         await patch;
       }
-      expect(sessions.state.result?.sessions[0]?.permissionMode).toBe(
-        canonical === "failure" ? "full" : canonical,
-      );
+      expect(mode()).toBe(canonical === "failure" ? "full" : canonical);
       expect(sessions.state.loading).toBe(false);
       expect(calls()).toBe(2);
     } finally {
@@ -115,8 +114,10 @@ it.each(["ordinary", "permission", "borrowed"] as const)(
     const initial = sessionsResult([row(key, sessionId)], 1);
     const blocker = createDeferred<SessionsListResult>();
     const queued = createDeferred<SessionsListResult>();
-    const { sessions, calls, message } = harness(initial, acknowledgment(key, sessionId), (call) =>
-      call === 2 ? blocker.promise : queued.promise,
+    const { sessions, calls, message, mode } = harness(
+      initial,
+      acknowledgment(key, sessionId),
+      (call) => (call === 2 ? blocker.promise : queued.promise),
     );
     const pending: Array<Promise<unknown>> = [];
     try {
@@ -129,9 +130,7 @@ it.each(["ordinary", "permission", "borrowed"] as const)(
       }
       const patch = sessions.patch(key, { permissionMode: "workspace" });
       pending.push(patch);
-      await vi.waitFor(() =>
-        expect(sessions.state.result?.sessions[0]?.permissionMode).toBe("workspace"),
-      );
+      await vi.waitFor(() => expect(mode()).toBe("workspace"));
       if (lastOwner !== "permission") {
         pending.push(sessions.refresh({ force: true }));
       }
@@ -142,7 +141,7 @@ it.each(["ordinary", "permission", "borrowed"] as const)(
       queued.reject(new Error("Selected refresh unavailable"));
       await Promise.all(pending);
       expect(sessions.state.loading).toBe(false);
-      expect(sessions.state.result?.sessions[0]?.permissionMode).toBe("full");
+      expect(mode()).toBe("full");
       expect(sessions.state.error).toBe(
         lastOwner !== "permission" ? "Selected refresh unavailable" : null,
       );
@@ -161,7 +160,7 @@ it("reports a permission refresh failure during another agent's active message",
   const key = "agent:main:permission-error";
   const sessionId = "permission-error-generation";
   const pending = createDeferred<SessionsListResult>();
-  const { sessions, calls, message } = harness(
+  const { sessions, calls, message, mode } = harness(
     sessionsResult([row(key, sessionId)], 1),
     acknowledgment(key, sessionId),
     () => pending.promise,
@@ -175,7 +174,7 @@ it("reports a permission refresh failure during another agent's active message",
     await expect(patch).resolves.toMatchObject({ listRefreshError: "Roster unavailable" });
     expect(sessions.state.error).toBe("Roster unavailable");
     expect(sessions.state.loading).toBe(false);
-    expect(sessions.state.result?.sessions[0]?.permissionMode).toBe("workspace");
+    expect(mode()).toBe("workspace");
   } finally {
     pending.resolve(sessionsResult([], 1));
     sessions.dispose();
