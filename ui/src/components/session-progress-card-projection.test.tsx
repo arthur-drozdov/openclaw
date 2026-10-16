@@ -313,7 +313,9 @@ describe("session progress card projection", () => {
       } as unknown as ApplicationGateway;
       const store = sessionProgressCardsForGateway(gateway);
       const subscribe = vi.spyOn(store, "subscribe");
-      onTestFinished(() => vi.restoreAllMocks());
+      onTestFinished(() => {
+        vi.restoreAllMocks();
+      });
 
       for (let connections = 1; connections <= 2; connections += 1) {
         const host = mountProgress({ store, target });
