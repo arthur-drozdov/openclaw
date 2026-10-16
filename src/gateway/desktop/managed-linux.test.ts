@@ -143,6 +143,52 @@ const noAudio: typeof createManagedLinuxAudio = (params) => {
   return { ready: Promise.resolve({ unavailableReason: "parec is not installed", stop }), stop };
 };
 
+function childInput(fake: ReturnType<typeof createFakeSupervisor>, index = 0) {
+  const input = fake.inputs[index];
+  if (input?.mode !== "child") {
+    throw new Error("expected child process input");
+  }
+  return input;
+}
+
+const availableAudio: typeof createManagedLinuxAudio = (params) =>
+  createManagedLinuxAudio({ ...params, runtime: { detectBinary: async () => true } });
+
+function hostService(desktop: ReturnType<typeof createManagedLinuxDesktop>, connId: string) {
+  const probe = vi.spyOn(rfbProbe, "probeRfbServer").mockResolvedValue({ kind: "unreachable" });
+  const registry = createDesktopSessionRegistry();
+  cleanups.push(() => registry.stopAll());
+  const service = createHostDesktopService({
+    getConfig: () => ({ enabled: true, managed: true }),
+    registry,
+    platform: "linux",
+    managedDesktop: desktop,
+  });
+  return { probe, registry, service, requester: { connId, isCurrent: () => true } };
+}
+
+function heldAudioGeneration(generationToHold: number) {
+  const entered = createDeferred();
+  const admission = createDeferred();
+  let generation = 0;
+  const createAudio: typeof createManagedLinuxAudio = (params) => {
+    const held = ++generation === generationToHold;
+    return createManagedLinuxAudio({
+      ...params,
+      runtime: {
+        detectBinary: async () => {
+          if (held) {
+            entered.resolve();
+            await admission.promise;
+          }
+          return true;
+        },
+      },
+    });
+  };
+  return { entered, admission, createAudio };
+}
+
 async function createFixture(createAudio = noAudio, onFailed?: (error: string) => void) {
   const root = tempDirs.make("openclaw-managed-linux-test-");
   const x11SocketDir = path.join(root, "x11");
@@ -200,20 +246,9 @@ describe("managed Linux desktop", () => {
   it.each([0, 1])(
     "refreshes audio through the cached host acquisition after process %s exits",
     async (processIndex) => {
-      const createAudio: typeof createManagedLinuxAudio = (params) =>
-        createManagedLinuxAudio({ ...params, runtime: { detectBinary: async () => true } });
-      const { desktop, fake } = await createFixture(createAudio);
-      const probe = vi.spyOn(rfbProbe, "probeRfbServer").mockResolvedValue({ kind: "unreachable" });
+      const { desktop, fake } = await createFixture(availableAudio);
+      const { probe, registry, service, requester } = hostService(desktop, "restart-viewer");
       const minted = vi.spyOn(audioBridge, "mintDesktopAudioObserver");
-      const registry = createDesktopSessionRegistry();
-      cleanups.push(() => registry.stopAll());
-      const service = createHostDesktopService({
-        getConfig: () => ({ enabled: true, managed: true }),
-        registry,
-        platform: "linux",
-        managedDesktop: desktop,
-      });
-      const requester = { connId: "restart-viewer", isCurrent: () => true };
       try {
         const first = await service.observe({ control: true, requester });
         const acquired = await desktop.acquire();
@@ -315,25 +350,8 @@ describe("managed Linux desktop", () => {
   });
 
   it.each(["stop", "desktop exit"])("joins pending audio recovery on %s", async (event) => {
-    const entered = createDeferred();
-    const admission = createDeferred();
+    const { entered, admission, createAudio } = heldAudioGeneration(2);
     cleanups.push(async () => admission.resolve());
-    let generation = 0;
-    const createAudio: typeof createManagedLinuxAudio = (params) => {
-      const recovering = generation++ === 1;
-      return createManagedLinuxAudio({
-        ...params,
-        runtime: {
-          detectBinary: async () => {
-            if (recovering) {
-              entered.resolve();
-              await admission.promise;
-            }
-            return true;
-          },
-        },
-      });
-    };
     const { desktop, fake } = await createFixture(createAudio);
     const acquired = await desktop.acquire();
     const source = acquired.resolveAudio!()!;
@@ -366,10 +384,7 @@ describe("managed Linux desktop", () => {
     const onFailed = vi.fn(() => failed.resolve());
     let generation = 0;
     const createAudio: typeof createManagedLinuxAudio = (params) => {
-      const owner = createManagedLinuxAudio({
-        ...params,
-        runtime: { detectBinary: async () => true },
-      });
+      const owner = availableAudio(params);
       if (++generation === 4) {
         void owner.ready.then((audio) => {
           const stop = audio.stop.bind(audio);
@@ -437,9 +452,7 @@ describe("managed Linux desktop", () => {
   });
 
   it("keeps audio retries independent of desktop failures and expires them after five minutes", async () => {
-    const createAudio: typeof createManagedLinuxAudio = (params) =>
-      createManagedLinuxAudio({ ...params, runtime: { detectBinary: async () => true } });
-    const { desktop, fake, advanceTime } = await createFixture(createAudio);
+    const { desktop, fake, advanceTime } = await createFixture(availableAudio);
     const acquired = await desktop.acquire();
     for (const index of [0, 4, 8]) {
       fake.exit(index);
@@ -458,37 +471,11 @@ describe("managed Linux desktop", () => {
   });
 
   it("rejects cached host observation during held generation startup before minting grants", async () => {
-    const admission = createDeferred();
-    const entered = createDeferred();
-    let generation = 0;
-    const createAudio: typeof createManagedLinuxAudio = (params) => {
-      const restarting = ++generation === 2;
-      return createManagedLinuxAudio({
-        ...params,
-        runtime: {
-          detectBinary: async () => {
-            if (restarting) {
-              entered.resolve();
-              await admission.promise;
-            }
-            return true;
-          },
-        },
-      });
-    };
+    const { admission, entered, createAudio } = heldAudioGeneration(2);
     const { desktop, fake } = await createFixture(createAudio);
-    const probe = vi.spyOn(rfbProbe, "probeRfbServer").mockResolvedValue({ kind: "unreachable" });
+    const { probe, registry, service, requester } = hostService(desktop, "held-restart-viewer");
     const minted = vi.spyOn(observeBridge, "mintDesktopObserverToken");
     const mintedAudio = vi.spyOn(audioBridge, "mintDesktopAudioObserver");
-    const registry = createDesktopSessionRegistry();
-    cleanups.push(() => registry.stopAll());
-    const service = createHostDesktopService({
-      getConfig: () => ({ enabled: true, managed: true }),
-      registry,
-      platform: "linux",
-      managedDesktop: desktop,
-    });
-    const requester = { connId: "held-restart-viewer", isCurrent: () => true };
     cleanups.push(async () => admission.resolve());
     try {
       const first = await service.observe({ control: true, requester });
@@ -530,16 +517,7 @@ describe("managed Linux desktop", () => {
           runtime: { detectBinary: async (binary) => !unavailable || binary !== missing },
         });
       const { desktop, fake } = await createFixture(createAudio);
-      const probe = vi.spyOn(rfbProbe, "probeRfbServer").mockResolvedValue({ kind: "unreachable" });
-      const registry = createDesktopSessionRegistry();
-      cleanups.push(() => registry.stopAll());
-      const service = createHostDesktopService({
-        getConfig: () => ({ enabled: true, managed: true }),
-        registry,
-        platform: "linux",
-        managedDesktop: desktop,
-      });
-      const requester = { connId: "setup-viewer", isCurrent: () => true };
+      const { probe, service, requester } = hostService(desktop, "setup-viewer");
       try {
         const first = await service.observe({ control: false, requester });
         expect(first.audio).toBeUndefined();
@@ -649,58 +627,32 @@ describe("managed Linux desktop", () => {
       expect.objectContaining({ input: expect.any(Buffer) }),
     );
 
-    const vncInput = fake.inputs[0];
-    const busInput = fake.inputs[1];
-    const sessionInput = fake.inputs[2];
-    if (
-      vncInput?.mode !== "child" ||
-      busInput?.mode !== "child" ||
-      sessionInput?.mode !== "child"
-    ) {
-      throw new Error("expected child process inputs");
-    }
+    const vncInput = childInput(fake);
+    const busInput = childInput(fake, 1);
+    const sessionInput = childInput(fake, 2);
     const passwordFile = vncInput.argv[vncInput.argv.indexOf("-PasswordFile") + 1];
     if (!passwordFile) {
       throw new Error("expected password file argument");
     }
     expect(
       vncInput.argv.map((value) => (value === passwordFile ? "<password-file>" : value)),
-    ).toEqual([
-      "Xtigervnc",
-      ":99",
-      "-geometry",
-      "1920x1080",
-      "-depth",
-      "24",
-      "-localhost",
-      "yes",
-      "-rfbport",
-      "45999",
-      "-SecurityTypes",
-      "VncAuth",
-      "-PasswordFile",
-      "<password-file>",
-      "-AlwaysShared",
-      "-AcceptSetDesktopSize",
-      "-nolisten",
-      "tcp",
-      "-ac",
-    ]);
+    ).toEqual(
+      (
+        "Xtigervnc :99 -geometry 1920x1080 -depth 24 -localhost yes -rfbport 45999 " +
+        "-SecurityTypes VncAuth -PasswordFile <password-file> " +
+        "-AlwaysShared -AcceptSetDesktopSize -nolisten tcp -ac"
+      ).split(" "),
+    );
     expect(sessionInput.argv).toEqual(["startxfce4"]);
     expect(sessionInput.env?.DISPLAY).toBe(":99");
+    const busAddress = `unix:path=${path.join(path.dirname(passwordFile), "bus")}`;
     expect(busInput.argv).toEqual([
-      "dbus-daemon",
-      "--session",
-      "--nofork",
-      "--nopidfile",
-      "--print-address=1",
-      `--address=unix:path=${path.join(path.dirname(passwordFile), "bus")}`,
+      ..."dbus-daemon --session --nofork --nopidfile --print-address=1".split(" "),
+      `--address=${busAddress}`,
     ]);
     const computer = await desktop.acquireComputer({ onStop: async () => undefined });
     expect(computer.env).toEqual(sessionInput.env);
-    expect(computer.env.DBUS_SESSION_BUS_ADDRESS).toBe(
-      `unix:path=${path.join(path.dirname(passwordFile), "bus")}`,
-    );
+    expect(computer.env.DBUS_SESSION_BUS_ADDRESS).toBe(busAddress);
     expect(computer.env.WAYLAND_DISPLAY).toBeUndefined();
     expect(computer.env.XDG_SESSION_TYPE).toBe("x11");
     expect(computer.env.PULSE_SERVER).toBe(process.env.PULSE_SERVER);
@@ -723,7 +675,7 @@ describe("managed Linux desktop", () => {
     await fs.writeFile(path.join(x11SocketDir, "X99"), "");
     await fs.writeFile(path.join(x11SocketDir, "X100"), "");
     const first = await desktop.acquire();
-    expect((fake.inputs[0] as Extract<SpawnInput, { mode: "child" }>).argv[1]).toBe(":101");
+    expect(childInput(fake).argv[1]).toBe(":101");
     await desktop.stop();
     const second = await desktop.acquire();
     expect(second.vncPassword).not.toBe(first.vncPassword);
@@ -745,7 +697,7 @@ describe("managed Linux desktop", () => {
       ].join("\n"),
     );
     await desktop.acquire();
-    expect((fake.inputs[0] as Extract<SpawnInput, { mode: "child" }>).argv[1]).toBe(":102");
+    expect(childInput(fake).argv[1]).toBe(":102");
     await desktop.stop();
   });
 
@@ -754,7 +706,7 @@ describe("managed Linux desktop", () => {
     await fs.mkdir(unixSocketTable);
     await fs.writeFile(path.join(x11SocketDir, "X99"), "");
     await desktop.acquire();
-    expect((fake.inputs[0] as Extract<SpawnInput, { mode: "child" }>).argv[1]).toBe(":100");
+    expect(childInput(fake).argv[1]).toBe(":100");
     await desktop.stop();
   });
 

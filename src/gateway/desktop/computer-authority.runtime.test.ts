@@ -11,6 +11,7 @@ import {
   validateAgentRunDelegatedAuthority,
 } from "../../infra/agent-run-registry.js";
 import { createCompiledSdkHost } from "../../plugins/compiled-sdk-host.test-support.js";
+import type { ComputerUseCapabilityDescriptor } from "../../plugins/computer-use-contract.js";
 import { registerComputerUseProvider } from "../../plugins/computer-use-registration.js";
 import { createPluginRecord } from "../../plugins/loader-records.js";
 import { computerUseSdkEntrypoint } from "../../plugins/loader-sdk-bridge-artifacts.test-support.js";
@@ -32,6 +33,15 @@ import { createTestRuntimeSecretsActivator } from "../server-startup-config.test
 import { createGatewayComputerService } from "./computer-service.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+function reachGate<T>(gate: Promise<T>, invocation: Promise<unknown>, label: string) {
+  return Promise.race([
+    gate,
+    invocation.then(() => {
+      throw new Error(`${label} native input never reached its gate`);
+    }),
+  ]);
+}
 
 it.each(["direct-run", "parent-closes-scope", "scope-closes"] as const)(
   "cancels %s authority after native input is queued in the real child and before its final effect",
@@ -76,6 +86,19 @@ it.each(["direct-run", "parent-closes-scope", "scope-closes"] as const)(
       throw new Error("Native input gate did not acquire a loopback port");
     }
     const pluginId = "fixture-authority-computer";
+    const capabilities: ComputerUseCapabilityDescriptor = {
+      contractVersion: 2,
+      provider: {
+        id: pluginId,
+        label: "Synthetic authority computer",
+        generation: "authority-generation",
+      },
+      actions: ["screenshot", "type"],
+      targets: ["screen"],
+      deliveryModes: ["foreground"],
+      observations: ["image"],
+      features: { recording: false, agentCursor: false, multiDisplay: false },
+    };
     const pluginRoot = state.path("plugin");
     fs.mkdirSync(pluginRoot);
     const fixture = createColdPluginFixture({
@@ -109,12 +132,7 @@ module.exports = {
   register(api) {
     registerComputerUseProvider(api, {
       id: ${JSON.stringify(pluginId)}, label: "Synthetic authority computer", isAvailable: () => true,
-      capabilities: () => ({
-        contractVersion: 2,
-        provider: { id: ${JSON.stringify(pluginId)}, label: "Synthetic authority computer", generation: "authority-generation" },
-        actions: ["screenshot", "type"], targets: ["screen"], deliveryModes: ["foreground"], observations: ["image"],
-        features: { recording: false, agentCursor: false, multiDisplay: false },
-      }),
+      capabilities: () => (${JSON.stringify(capabilities)}),
       async openExecution() {
         let tail = Promise.resolve();
         return {
@@ -194,19 +212,7 @@ module.exports = {
         id: pluginId,
         label: "Synthetic authority computer",
         isAvailable: () => true,
-        capabilities: () => ({
-          contractVersion: 2,
-          provider: {
-            id: pluginId,
-            label: "Synthetic authority computer",
-            generation: "authority-generation",
-          },
-          actions: ["screenshot", "type"],
-          targets: ["screen"],
-          deliveryModes: ["foreground"],
-          observations: ["image"],
-          features: { recording: false, agentCursor: false, multiDisplay: false },
-        }),
+        capabilities: () => capabilities,
         openExecution: async () => {
           throw new Error("Native execution must run in the child");
         },
@@ -314,12 +320,7 @@ module.exports = {
       expect(await service.status()).toMatchObject({ configured: true, available: true });
       const allowed = invoke("allowed");
       pending.push(allowed);
-      const releaseAllowed = await Promise.race([
-        entered.promise,
-        allowed.then(() => {
-          throw new Error("Allowed native input never reached its gate");
-        }),
-      ]);
+      const releaseAllowed = await reachGate(entered.promise, allowed, "Allowed");
       releaseAgentRunDelegatedAuthority(unrelated);
       expect(validateAgentRunDelegatedAuthority(authority)).toBe(true);
       releaseAllowed.writeHead(204).end();
@@ -328,20 +329,10 @@ module.exports = {
 
       const blocker = invoke("blocker");
       pending.push(blocker);
-      await Promise.race([
-        blockerEntered.promise,
-        blocker.then(() => {
-          throw new Error("Blocking native input never reached its gate");
-        }),
-      ]);
+      await reachGate(blockerEntered.promise, blocker, "Blocking");
       const revoked = invoke("revoked");
       pending.push(revoked);
-      await Promise.race([
-        revokedQueued.promise,
-        revoked.then(() => {
-          throw new Error("Revoked native input never entered the child queue");
-        }),
-      ]);
+      await reachGate(revokedQueued.promise, revoked, "Revoked queued");
       if (mode === "scope-closes") {
         scopeLifetime.abort();
         expect(validateAgentRunDelegatedAuthority(parentAuthority)).toBe(true);

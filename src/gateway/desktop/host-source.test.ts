@@ -105,6 +105,22 @@ function fakeManagedDesktop(
   return { acquire, acquireComputer, managed, stop };
 }
 
+function managedService(
+  managed: ManagedLinuxDesktop,
+  getConfig = (): DesktopHostConfig => ({ enabled: true, managed: true }),
+  lingerMs?: number,
+) {
+  const registry = createDesktopSessionRegistry({ lingerMs });
+  cleanups.push(() => registry.stopAll());
+  const service = createHostDesktopService({
+    getConfig,
+    registry,
+    platform: "linux",
+    managedDesktop: managed,
+  });
+  return { service, registry };
+}
+
 describe("gateway host desktop source", () => {
   it.each<{
     name: string;
@@ -320,14 +336,7 @@ describe("gateway host desktop source", () => {
           ? { resolveAudio: () => ({ start }) }
           : { audioUnavailableReason: reason }),
       });
-      const registry = createDesktopSessionRegistry();
-      cleanups.push(() => registry.stopAll());
-      const service = createHostDesktopService({
-        getConfig: () => ({ enabled: true, managed: true }),
-        registry,
-        platform: "linux",
-        managedDesktop: managed.managed,
-      });
+      const { service } = managedService(managed.managed);
       const requester = { connId: "setup-diagnostic-viewer", isCurrent: () => true };
       const observed = await service.observe({ control: mode === "available", requester });
       if (mode === "available") {
@@ -356,14 +365,7 @@ describe("gateway host desktop source", () => {
     vi.useFakeTimers();
     vi.spyOn(rfbProbe, "probeRfbServer").mockResolvedValue({ kind: "unreachable" });
     const managed = fakeManagedDesktop();
-    const registry = createDesktopSessionRegistry({ lingerMs: 10 });
-    const service = createHostDesktopService({
-      getConfig: () => ({ enabled: true, managed: true }),
-      platform: "linux",
-      registry,
-      managedDesktop: managed.managed,
-    });
-    cleanups.push(() => registry.stopAll());
+    const { service, registry } = managedService(managed.managed, undefined, 10);
     const computer = await service.acquireComputer({ onStop: async () => undefined });
     await service.observe({ control: false });
     const observers = Array.from({ length: 8 }, () =>
@@ -440,14 +442,7 @@ describe("gateway host desktop source", () => {
     vi.spyOn(rfbProbe, "probeRfbServer").mockResolvedValue({ kind: "unreachable" });
     const managed = fakeManagedDesktop();
     let config: DesktopHostConfig = { enabled: true, managed: true };
-    const registry = createDesktopSessionRegistry();
-    const service = createHostDesktopService({
-      getConfig: () => config,
-      registry,
-      platform: "linux",
-      managedDesktop: managed.managed,
-    });
-    cleanups.push(() => registry.stopAll());
+    const { service, registry } = managedService(managed.managed, () => config);
     const onStop = vi.fn(async () => undefined);
     const computer = await service.acquireComputer({ onStop });
     expect(computer.isCurrent()).toBe(true);
@@ -490,14 +485,7 @@ describe("gateway host desktop source", () => {
         });
       }
       let config: DesktopHostConfig = { enabled: true, managed: true };
-      const registry = createDesktopSessionRegistry();
-      const service = createHostDesktopService({
-        getConfig: () => config,
-        registry,
-        platform: "linux",
-        managedDesktop: managed.managed,
-      });
-      cleanups.push(() => registry.stopAll());
+      const { service } = managedService(managed.managed, () => config);
       const observed = expect(service.observe({ control: false })).rejects.toThrow(
         "Desktop session stopped before connecting",
       );
@@ -516,23 +504,17 @@ describe("gateway host desktop source", () => {
 
   it("reports managed mode as Linux-only on other platforms", async () => {
     const managed = fakeManagedDesktop();
-    const source = createHostDesktopSource({
+    const options = {
       config: { enabled: true, managed: true },
-      platform: "darwin",
+      platform: "darwin" as const,
       managedDesktop: managed.managed,
-      probeRfb: async () => ({ kind: "unreachable" }),
-    });
+      probeRfb: async () => ({ kind: "unreachable" as const }),
+    };
+    const source = createHostDesktopSource(options);
     await expect(source.acquire()).rejects.toThrow(
       "desktop.host.managed is available only on Linux",
     );
-    await expect(
-      inspectHostDesktop({
-        config: { enabled: true, managed: true },
-        platform: "darwin",
-        managedDesktop: managed.managed,
-        probeRfb: async () => ({ kind: "unreachable" }),
-      }),
-    ).resolves.toMatchObject({
+    await expect(inspectHostDesktop(options)).resolves.toMatchObject({
       status: { state: "unavailable" },
       detail: expect.stringContaining("available only on Linux"),
     });

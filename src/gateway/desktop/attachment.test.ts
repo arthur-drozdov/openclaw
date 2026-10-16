@@ -13,6 +13,26 @@ vi.mock("../../logging/subsystem.js", () => ({
 
 const servers: net.Server[] = [];
 const sockets: net.Socket[] = [];
+const tcpAttachment = { kind: "tcp", host: "127.0.0.1", port: 5900 } as const;
+type Registry = ReturnType<typeof createDesktopSessionRegistry>;
+function request(overrides: Partial<Parameters<Registry["acquire"]>[0]> = {}) {
+  return {
+    sourceKey: "node:one",
+    ownerEpoch: 1,
+    start: async () => ({ attachment: tcpAttachment }),
+    ...overrides,
+  };
+}
+
+function heldCleanup() {
+  const entered = createDeferredCore();
+  const release = createDeferredCore();
+  const teardown = async () => {
+    entered.resolve();
+    await release.promise;
+  };
+  return { entered, release, teardown };
+}
 
 function createPendingStream(registry: ReturnType<typeof createDesktopSessionRegistry>) {
   return registry.createStream({ sourceKey: "node:one", ownerEpoch: 1, onStopped: () => {} });
@@ -62,13 +82,7 @@ describe("RFB attachments", () => {
 
   it.each([false, true])("claims only its source's live stream (closed: %s)", async (closed) => {
     const registry = createDesktopSessionRegistry();
-    await registry.acquire({
-      sourceKey: "node:one",
-      ownerEpoch: 1,
-      start: async () => ({
-        attachment: { kind: "tcp", host: "127.0.0.1", port: 5900 },
-      }),
-    });
+    await registry.acquire(request());
     await registry.activate({ sourceKey: "node:two", ownerEpoch: 1 });
     const stream = new PassThrough();
     const pending = createPendingStream(registry);
@@ -110,15 +124,10 @@ describe("RFB attachments", () => {
     vi.useFakeTimers();
     const teardown = vi.fn(async () => undefined);
     const registry = createDesktopSessionRegistry({ lingerMs: 25 });
-    const request = {
-      sourceKey: "node:one",
-      ownerEpoch: 1,
-      teardown,
-      start: async () => ({ attachment: { kind: "tcp", host: "127.0.0.1", port: 5900 } as const }),
-    };
-    await registry[method](request);
+    const params = request({ teardown });
+    await registry[method](params);
     await vi.advanceTimersByTimeAsync(20);
-    await registry[method](request);
+    await registry[method](params);
     await vi.advanceTimersByTimeAsync(20);
     expect(teardown).not.toHaveBeenCalled();
 
@@ -129,16 +138,8 @@ describe("RFB attachments", () => {
 
   it.each(["stop", "stopAll"] as const)("%s joins teardown already in progress", async (method) => {
     const registry = createDesktopSessionRegistry();
-    const entered = createDeferredCore();
-    const release = createDeferredCore();
-    await registry.activate({
-      sourceKey: "node:one",
-      ownerEpoch: 1,
-      teardown: async () => {
-        entered.resolve();
-        await release.promise;
-      },
-    });
+    const { entered, release, teardown } = heldCleanup();
+    await registry.activate(request({ teardown }));
     const completed: string[] = [];
     let reentrantStop: Promise<void> | undefined;
     registry.attachObserver("node:one", {
@@ -171,21 +172,11 @@ describe("RFB attachments", () => {
 
   it.each([1, 2])("waits for stopped resources before acquiring epoch %s", async (ownerEpoch) => {
     const registry = createDesktopSessionRegistry();
-    const entered = createDeferredCore();
-    const release = createDeferredCore();
-    const attachment = { kind: "tcp", host: "127.0.0.1", port: 5900 } as const;
-    await registry.acquire({
-      sourceKey: "node:one",
-      ownerEpoch: 1,
-      start: async () => ({ attachment }),
-      teardown: async () => {
-        entered.resolve();
-        await release.promise;
-      },
-    });
+    const { entered, release, teardown } = heldCleanup();
+    await registry.acquire(request({ teardown }));
     const stopping = registry.stop("node:one", 1);
     await entered.promise;
-    const start = vi.fn(async () => ({ attachment }));
+    const start = vi.fn(async () => ({ attachment: tcpAttachment }));
     const acquiring = registry.acquire({ sourceKey: "node:one", ownerEpoch, start });
     try {
       await setImmediate();
@@ -217,18 +208,16 @@ describe("RFB attachments", () => {
       const failure = new Error("transport still running");
       const teardown = vi.fn().mockRejectedValue(failure);
       const dispose = vi.fn(async () => undefined);
-      const start = vi.fn(async () => ({
-        attachment: { kind: "tcp", host: "127.0.0.1", port: 5900 } as const,
-      }));
-      const request = { sourceKey: "node:one", ownerEpoch: 1, start, teardown, dispose };
+      const start = vi.fn(async () => ({ attachment: tcpAttachment }));
+      const params = request({ start, teardown, dispose });
       cleanupWarning.mockClear();
-      await registry.acquire(request);
+      await registry.acquire(params);
       try {
         if (ownerEpoch === 1) {
           await expect(registry.stop("node:one", 1)).rejects.toBe(failure);
         }
         for (let attempt = 1; attempt < 300; attempt++) {
-          await expect(registry.acquire({ ...request, ownerEpoch })).rejects.toBe(failure);
+          await expect(registry.acquire({ ...params, ownerEpoch })).rejects.toBe(failure);
         }
         expect(teardown).toHaveBeenCalledOnce();
         expect(cleanupWarning).toHaveBeenCalledOnce();
@@ -243,7 +232,7 @@ describe("RFB attachments", () => {
       // Only the original owner remains to recover, with teardown bracketing initialization.
       expect(teardown).toHaveBeenCalledTimes(2);
       expect(dispose).toHaveBeenCalledOnce();
-      await registry.acquire({ ...request, ownerEpoch: 2 });
+      await registry.acquire({ ...params, ownerEpoch: 2 });
       expect(start).toHaveBeenCalledTimes(2);
       await registry.stopAll();
     },
@@ -253,19 +242,9 @@ describe("RFB attachments", () => {
     "keeps a replacement visible to %s stop while its predecessor drains",
     async (scope) => {
       const registry = createDesktopSessionRegistry();
-      const entered = createDeferredCore();
-      const release = createDeferredCore();
-      await registry.activate({
-        sourceKey: "node:one",
-        ownerEpoch: 1,
-        teardown: async () => {
-          entered.resolve();
-          await release.promise;
-        },
-      });
-      const start = vi.fn(async () => ({
-        attachment: { kind: "tcp", host: "127.0.0.1", port: 5900 } as const,
-      }));
+      const { entered, release, teardown } = heldCleanup();
+      await registry.activate(request({ teardown }));
+      const start = vi.fn(async () => ({ attachment: tcpAttachment }));
       const acquiring = registry.acquire({ sourceKey: "node:one", ownerEpoch: 2, start });
       const outcome = acquiring.then(
         () => "ready",
