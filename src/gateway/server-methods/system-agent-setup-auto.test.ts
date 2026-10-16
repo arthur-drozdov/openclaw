@@ -82,6 +82,14 @@ const presentedCodex = {
   detail: "Stored credentials found",
   brandId: "openai",
 };
+const ollama: SetupInferenceCandidate = {
+  kind: "provider-auto:ollama-local",
+  modelRef: "ollama/fixture",
+  label: "Ollama",
+  detail: "Available locally",
+  credentials: true,
+  recommended: false,
+};
 
 const chatGptSignIn = {
   id: "openai-device-code",
@@ -132,6 +140,58 @@ afterEach(() => {
 });
 
 describe("Gateway automatic inference setup", () => {
+  it("surfaces detection errors before choosing or preparing any inference route", async () => {
+    fixture.detect.mockRejectedValueOnce(new Error("Codex detection failed: permission denied"));
+
+    await expect(runGatewayAutomaticSetup(context(), () => {})).rejects.toThrow(
+      "Codex detection failed: permission denied",
+    );
+    expect(fixture.activate).not.toHaveBeenCalled();
+    expect(fixture.prepare).not.toHaveBeenCalled();
+    expect(fixture.commit).not.toHaveBeenCalled();
+  });
+
+  it.each(["result", "throw"])(
+    "shows Codex inspection failure without activating Ollama: %s",
+    async (failureMode) => {
+      fixture.detect.mockResolvedValueOnce(detection([ollama, codex]));
+      const error = "Cannot inspect Codex processes. Check process inspection permissions.";
+      if (failureMode === "throw") {
+        fixture.activate.mockRejectedValueOnce(new Error(error));
+      } else {
+        fixture.activate.mockResolvedValueOnce({ ok: false, status: "unavailable", error });
+      }
+
+      expect(await runGatewayAutomaticSetup(context(), () => {})).toMatchObject({
+        status: "unavailable",
+        attempts: [{ kind: "codex-cli", label: "Codex", error }],
+        alternatives: [{ kind: ollama.kind, modelRef: ollama.modelRef }],
+      });
+      expect(fixture.activate).toHaveBeenCalledOnce();
+      expect(fixture.activate).toHaveBeenCalledWith(expect.objectContaining({ kind: "codex-cli" }));
+      expect(fixture.prepare).not.toHaveBeenCalled();
+      expect(fixture.commit).not.toHaveBeenCalled();
+    },
+  );
+
+  it("can select Ollama when Codex is genuinely absent", async () => {
+    fixture.detect.mockResolvedValueOnce(detection([{ ...ollama }]));
+    fixture.activate.mockResolvedValueOnce({
+      ok: true,
+      modelRef: "ollama/fixture",
+      latencyMs: 1,
+      lines: [],
+    });
+
+    expect(await runGatewayAutomaticSetup(context(), () => {})).toMatchObject({
+      status: "activated",
+      selected: { kind: "provider-auto:ollama-local", modelRef: "ollama/fixture" },
+      attempts: [],
+    });
+    expect(fixture.activate).toHaveBeenCalledOnce();
+    expect(fixture.prepare).not.toHaveBeenCalled();
+  });
+
   it("returns an existing model and ranked alternatives without starting a write", async () => {
     const current: SetupInferenceCandidate = {
       ...codex,

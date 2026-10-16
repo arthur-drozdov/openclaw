@@ -13,7 +13,7 @@ vi.mock("./darwin-bun-process-census.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./darwin-bun-process-census.js")>()),
   readDarwinBunProcessCensus: nativeDarwinCensus,
 }));
-vi.mock("node:child_process", () => ({ spawnSync: census }));
+vi.mock("node:child_process", () => ({ spawnSync: census, execFile: vi.fn() }));
 vi.mock("node:fs", () => ({ readdirSync: directory, readFileSync: readStat }));
 vi.mock("../../shared/pid-alive.js", () => ({ isPidDefinitelyDead: definitelyDead }));
 import {
@@ -144,7 +144,14 @@ it.each([
   "observes Darwin ownership excluding only the inspector: %s",
   (_name, result, expected) => {
     mockProcessPlatform("darwin");
-    census.mockReturnValue({ pid: owner + 1, ...result });
+    census.mockReturnValue({
+      pid: owner + 1,
+      ...result,
+      stdout: result.stdout
+        .split("\n")
+        .map((row) => row.replace(/^(\d+) (\d+) (\S+)$/, "$1 1 $2 $3 501 Sat Aug 29 10:00:00 2026"))
+        .join("\n"),
+    });
     expect(hasLiveOwnedProcessGroupMembers()).toBe(expected);
     expect(directory).not.toHaveBeenCalled();
     expect(readStat).not.toHaveBeenCalled();
@@ -167,7 +174,7 @@ it("joins Darwin numeric ancestry to exact native command facts", () => {
   census.mockReturnValue({
     pid: owner + 3,
     status: 0,
-    stdout: `${owner} ${owner} S 1 501\n1 1 S 0 0\n2 2 S 0 -2\n${owner + 1} ${owner} S 1 501\n${owner + 3} ${owner} R ${owner} 501\n`,
+    stdout: `${owner} 1 ${owner} S 501 Sat Aug 29 10:00:00 2026\n1 0 1 S 0 Sat Aug 29 10:00:00 2026\n2 0 2 S -2 Sat Aug 29 10:00:00 2026\n${owner + 1} 1 ${owner} S 501 Sat Aug 29 10:00:00 2026\n${owner + 3} ${owner} ${owner} R 501 Sat Aug 29 10:00:00 2026\n`,
   });
   darwinCommand.mockImplementation((pid: number, uid: number) =>
     pid === owner
@@ -221,7 +228,10 @@ it.each([1000, 2000, undefined])(
 
 it("does not turn native Darwin inspection failures into an empty census", () => {
   mockProcessPlatform("darwin");
-  census.mockReturnValue({ status: 0, stdout: `${owner} ${owner} S 1 501\n` });
+  census.mockReturnValue({
+    status: 0,
+    stdout: `${owner} 1 ${owner} S 501 Sat Aug 29 10:00:00 2026\n`,
+  });
   darwinCommand.mockImplementation(() => {
     throw new Error("native process inspection unavailable");
   });
@@ -255,4 +265,17 @@ it("uses the native census in Darwin Bun when sandboxed ps cannot execute", () =
   ]);
   expect(census).not.toHaveBeenCalled();
   expect(darwinCommand).toHaveBeenCalledExactlyOnceWith(owner, 501);
+});
+
+it("does not request Node Darwin arguments for kernel tasks or zombie states with flags", () => {
+  mockProcessPlatform("darwin");
+  census.mockReturnValue({
+    status: 0,
+    stdout: `0 0 0 R 0 Sat Aug 29 10:00:00 2026\n${owner} 1 ${owner} Z+ 501 Sat Aug 29 10:00:00 2026\n`,
+  });
+  expect([...readProcessGroupMembers(1000, { readDarwinCommand: darwinCommand })]).toEqual([
+    { pid: 0, pgid: 0, state: "R", command: { ppid: 0, argv: [], uid: 0 } },
+    { pid: owner, pgid: owner, state: "Z+", command: { ppid: 1, argv: [], uid: 501 } },
+  ]);
+  expect(darwinCommand).not.toHaveBeenCalled();
 });

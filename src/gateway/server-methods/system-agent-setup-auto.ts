@@ -82,6 +82,7 @@ async function autoSetup(assertAuthority: () => void): Promise<SystemAgentSetupA
   const failed = new Set<string>();
   const installedPlugins: string[] = [];
   let codexNeedsSignIn = false;
+  let codexFailed = false;
   let shared = false;
   let authOptions = detection.authOptions;
   const result = (
@@ -197,6 +198,11 @@ async function autoSetup(assertAuthority: () => void): Promise<SystemAgentSetupA
     if (candidate.kind === "codex-cli" && activation.status === "auth") {
       codexNeedsSignIn = true;
     }
+    if (candidate.kind === "codex-cli" && activation.status !== "auth") {
+      // An installed Codex runtime that cannot be inspected or started is not absent.
+      // Keep its diagnostic visible instead of silently selecting another provider.
+      codexFailed = true;
+    }
     attempts.push({ kind: candidate.kind, label: candidate.label, error: activation.error });
     return false;
   };
@@ -204,6 +210,9 @@ async function autoSetup(assertAuthority: () => void): Promise<SystemAgentSetupA
   for (const candidate of ranked.slice(0, 3)) {
     if (await activate(candidate)) {
       return result("activated", candidate);
+    }
+    if (codexFailed) {
+      return result("unavailable");
     }
   }
   try {
