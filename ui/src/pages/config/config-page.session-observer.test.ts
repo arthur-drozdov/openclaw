@@ -31,6 +31,29 @@ import { configSelectionFromSearch, type ConfigPageId } from "./config-sections.
 import { configRouteData } from "./route-data.ts";
 import { pages } from "./route.ts";
 
+const objectSchema = (properties: object) => ({ type: "object", properties });
+const fieldSchema = (field: string, type: string) => objectSchema({ [field]: { type } });
+const communicationsRoute = (search = "", hash = "") =>
+  configRouteData({ pathname: "/settings/communications", search, hash });
+const catalogModels = (id: string, name: string, provider = "openai") => [{ id, name, provider }];
+function gatewaySource(overrides: Partial<ApplicationGatewaySnapshot>) {
+  return createApplicationGateway({ ...createApplicationGateway().gateway.snapshot, ...overrides });
+}
+function query<T extends Element = HTMLElement>(root: ParentNode, selector: string) {
+  return expectDefined(root.querySelector<T>(selector), selector);
+}
+const emptyRequest = () =>
+  vi.fn((method: string) => Promise.resolve(method === "models.list" ? { models: [] } : {}));
+
+afterEach(() => {
+  cleanupSolid();
+  document.body.replaceChildren();
+  resetServerUiPrefsSync();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
 describe("ConfigPage navigation", () => {
   beforeEach(() => {
     window.history.replaceState({}, "", "/");
@@ -38,69 +61,45 @@ describe("ConfigPage navigation", () => {
     resetServerUiPrefsSync();
   });
 
-  afterEach(async () => {
-    cleanupSolid();
-    document.body.replaceChildren();
-    resetServerUiPrefsSync();
-    vi.restoreAllMocks();
-    vi.unstubAllGlobals();
+  it("keeps curated sections off the Advanced page", () => {
+    for (const [section, activeSection] of [
+      ["messages", null],
+      ["env", "env"],
+      ["mcp", null],
+      ["tts", null],
+      ["broadcast", "broadcast"],
+      ["models", "models"],
+    ]) {
+      expect(configSelectionFromSearch("advanced", `?section=${section}`)).toEqual({
+        activeSection,
+        activeSubsection: null,
+      });
+    }
   });
-
-  describe("ConfigPage advanced selection guard", () => {
-    it("keeps curated sections off the Advanced page", () => {
-      for (const [section, activeSection] of [
-        ["messages", null],
-        ["env", "env"],
-        ["mcp", null],
-        ["tts", null],
-        ["broadcast", "broadcast"],
-        ["models", "models"],
-      ]) {
-        expect(configSelectionFromSearch("advanced", `?section=${section}`)).toEqual({
-          activeSection,
-          activeSubsection: null,
-        });
-      }
-    });
-  });
-
-  describe("ConfigPage default selections", () => {
-    it.each(["__proto__"])("rejects an unsupported runtime page id: %s", (pageId) => {
-      expect(() => configSelectionFromSearch(pageId as ConfigPageId, "")).toThrow(
-        "Unknown config page",
-      );
-    });
+  it("rejects an unsupported runtime page id", () => {
+    expect(() => configSelectionFromSearch("__proto__" as ConfigPageId, "")).toThrow(
+      "Unknown config page",
+    );
   });
 
   function routeContext(): ApplicationContext {
     const config = { messages: { ackReaction: "!" }, tts: { provider: "synthetic" } };
-    const { gateway } = createApplicationGateway({
-      client: null,
+    const { gateway } = gatewaySource({
       phase: "offline",
       offlineStable: true,
-      hello: null,
-      canvasPluginSurfaceUrl: null,
       assistantAgentId: "main",
       sessionKey: "main",
-      lastError: null,
-      lastErrorCode: null,
     });
     return completeConfigContext({
       gateway,
-      config: {
-        current: { assistantIdentity: { name: "OpenClaw" }, serverVersion: "test" },
-      },
       runtimeConfig: {
         state: {
           connected: false,
           configSnapshot: { config, runtimeConfig: config, hash: "settings-defaults" },
-          configSchema: {
-            type: "object",
-            properties: {
-              messages: { type: "object", properties: { ackReaction: { type: "string" } } },
-              tts: { type: "object", properties: { provider: { type: "string" } } },
-            },
-          },
+          configSchema: objectSchema({
+            messages: fieldSchema("ackReaction", "string"),
+            tts: fieldSchema("provider", "string"),
+          }),
           configForm: config,
           configFormOriginal: config,
           configRaw: JSON.stringify(config),
@@ -117,24 +116,12 @@ describe("ConfigPage navigation", () => {
     ] as const)(
       "opens the $section advanced editor for a matching hash",
       async ({ pageId, section }) => {
-        const base = routeContext();
+        const context = routeContext();
         const config = { [section]: { enabled: true } };
-        const context: ApplicationContext = {
-          ...base,
-          runtimeConfig: {
-            ...base.runtimeConfig,
-            state: {
-              ...base.runtimeConfig.state,
-              configForm: config,
-              configSchema: {
-                type: "object",
-                properties: {
-                  [section]: { type: "object", properties: { enabled: { type: "boolean" } } },
-                },
-              },
-            },
-          },
-        };
+        Object.assign(context.runtimeConfig.state, {
+          configForm: config,
+          configSchema: objectSchema({ [section]: fieldSchema("enabled", "boolean") }),
+        });
         const routeData = configRouteData({
           pathname: `/settings/${pageId}`,
           search: `?section=${section}`,
@@ -160,40 +147,23 @@ describe("ConfigPage navigation", () => {
       { profile: undefined, writes: 1 },
       { profile: "full", writes: 0 },
     ])("Security Full preserves an explicit choice from $profile", async ({ profile, writes }) => {
-      const baseContext = routeContext();
+      const context = routeContext();
       const patchForm = vi.fn();
       const removeFormValue = vi.fn();
-      const context: ApplicationContext = {
-        ...baseContext,
-        gateway: {
-          ...baseContext.gateway,
-          snapshot: {
-            ...baseContext.gateway.snapshot,
-            phase: "connected",
-            hello: gatewayHelloForMethods(["config.set"]),
-          },
-        },
-        runtimeConfig: {
-          ...baseContext.runtimeConfig,
-          canSet: true,
-          patchForm,
-          removeFormValue,
-          state: {
-            ...baseContext.runtimeConfig.state,
-            connected: true,
-            configForm: profile ? { tools: { profile } } : {},
-          },
-        },
-      };
+      Object.assign(context.gateway.snapshot, {
+        phase: "connected",
+        hello: gatewayHelloForMethods(["config.set"]),
+      });
+      Object.assign(context.runtimeConfig, { canSet: true, patchForm, removeFormValue });
+      Object.assign(context.runtimeConfig.state, {
+        connected: true,
+        configForm: profile ? { tools: { profile } } : {},
+      });
       const { page } = mountConfigPage(context, { pageId: "security" });
-      flush();
 
       expect(patchForm).not.toHaveBeenCalled();
       expect(removeFormValue).not.toHaveBeenCalled();
-      const full = expectDefined(
-        page.querySelector<HTMLInputElement>('.settings-segmented__input[value="full"]'),
-        "Full tool choice",
-      );
+      const full = query<HTMLInputElement>(page, '.settings-segmented__input[value="full"]');
       expect(page.querySelectorAll(".settings-segmented__input")).toHaveLength(4);
       expect(page.querySelectorAll(".settings-segmented__btn--active")).toHaveLength(
         profile ? 1 : 0,
@@ -238,10 +208,7 @@ describe("ConfigPage navigation", () => {
             render({ data: data as ConfigPageRouteData, loaderPending: false, presented: true }),
           { wrapper: provider.wrapper },
         );
-        const page = expectDefined(
-          container.querySelector<HTMLElement>("openclaw-config-page"),
-          "mounted config page",
-        );
+        const page = query(container, "openclaw-config-page");
         flush();
 
         await waitForSolid(() => expect(page.querySelector(`#${visibleId}`)).not.toBeNull());
@@ -258,14 +225,13 @@ describe("ConfigPage navigation", () => {
   it("keeps the config owner through a pending subpage loader in the real outlet", async () => {
     const context = completeConfigContext(routeContext());
     const configPages = pages.filter((route) => route.id !== "settings" && route.id !== "config");
-    const communications = expectDefined(
-      configPages.find((route) => route.id === "communications"),
-      "communications route",
-    );
-    const advanced = expectDefined(
-      configPages.find((route) => route.id === "advanced"),
-      "advanced route",
-    );
+    const findRoute = (id: string) =>
+      expectDefined(
+        configPages.find((route) => route.id === id),
+        id,
+      );
+    const communications = findRoute("communications");
+    const advanced = findRoute("advanced");
     const loadAdvanced = expectDefined(advanced.loader, "advanced loader");
     const releaseAdvanced = deferred();
     const provider = createSolidApplicationContextProvider(context);
@@ -306,42 +272,30 @@ describe("ConfigPage navigation", () => {
         "communications",
         context,
         {},
-        {
-          pathname: "/settings/communications",
-          search: "?section=tts",
-          hash: "",
-        },
+        { pathname: "/settings/communications", search: "?section=tts", hash: "" },
       );
       await waitForSolid(() => {
         expect(mounted.querySelector("#config-section-tts")).not.toBeNull();
       });
-      const host = expectDefined(mounted.querySelector("openclaw-config-page"), "config host");
-      expect(host.querySelector(".content-header--settings .page-title")?.textContent).toBe(
-        "Communications",
-      );
+      const host = query(mounted, "openclaw-config-page");
+      const title = () => host.querySelector(".content-header--settings .page-title")?.textContent;
+      expect(title()).toBe("Communications");
 
       const navigation = router.navigate("advanced", context);
       await waitForSolid(() => {
         const pending = router.getState().matches[0];
-        expect(pending?.routeId).toBe("advanced");
-        expect(pending?.status).toBe("pending");
+        expect(pending).toMatchObject({ routeId: "advanced", status: "pending" });
         expect(pending?.module).toBeDefined();
         expect(pending?.data).toBeUndefined();
       });
       expect(mounted.querySelector("openclaw-config-page")).toBe(host);
       expect(host.isConnected).toBe(true);
-      expect(host.querySelector(".content-header--settings .page-title")?.textContent).toBe(
-        "Communications",
-      );
+      expect(title()).toBe("Communications");
       expect(host.querySelector("#config-section-tts")).not.toBeNull();
 
       releaseAdvanced.resolve(undefined);
       await navigation;
-      await waitForSolid(() => {
-        expect(host.querySelector(".content-header--settings .page-title")?.textContent).toBe(
-          "Advanced",
-        );
-      });
+      await waitForSolid(() => expect(title()).toBe("Advanced"));
       expect(mounted.querySelector("openclaw-config-page")).toBe(host);
       expect(host.isConnected).toBe(true);
     } finally {
@@ -351,79 +305,59 @@ describe("ConfigPage navigation", () => {
     }
   });
 
-  describe("ConfigPage pending section navigation", () => {
-    it.each(["replacement", "retirement", "disconnect"] as const)(
-      "does not scroll to a stale target after %s",
-      async (transition) => {
-        const view = mountConfigPage(routeContext(), {
-          pageId: "communications",
-          routeData: configRouteData({
-            pathname: "/settings/communications",
-            search: "",
-            hash: "",
-          }),
-        });
-        const { page } = view;
-        flush();
-        const frames = new Map<number, FrameRequestCallback>();
-        let nextFrameId = 0;
-        vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
-          const id = ++nextFrameId;
-          frames.set(id, callback);
-          return id;
-        });
-        vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id) => {
-          frames.delete(id);
-        });
-        const previousTarget = expectDefined(
-          page.querySelector<HTMLElement>("#config-section-messages"),
-          "rendered Messages section",
-        );
-        const previousScroll = vi.fn();
-        previousTarget.scrollIntoView = previousScroll;
-        view.update({
-          routeData: configRouteData({
-            pathname: "/settings/communications",
-            search: "",
-            hash: "#config-section-messages",
-          }),
-        });
-        flush();
-        expect(previousScroll).not.toHaveBeenCalled();
-        expect(frames.size).toBe(1);
+  it.each(["replacement", "retirement", "disconnect"] as const)(
+    "does not scroll to a stale target after %s",
+    async (transition) => {
+      const view = mountConfigPage(routeContext(), {
+        pageId: "communications",
+        routeData: communicationsRoute(),
+      });
+      const { page } = view;
+      const frames = new Map<number, FrameRequestCallback>();
+      let nextFrameId = 0;
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+        const id = ++nextFrameId;
+        frames.set(id, callback);
+        return id;
+      });
+      vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id) => {
+        frames.delete(id);
+      });
+      const previousTarget = query(page, "#config-section-messages");
+      const previousScroll = vi.fn();
+      previousTarget.scrollIntoView = previousScroll;
+      view.update({
+        routeData: communicationsRoute("", "#config-section-messages"),
+      });
+      expect(previousScroll).not.toHaveBeenCalled();
+      expect(frames.size).toBe(1);
 
-        if (transition === "disconnect") {
-          view.dispose();
-        } else {
-          view.update({
-            routeData: configRouteData({
-              pathname: "/settings/communications",
-              search: transition === "replacement" ? "?section=tts" : "",
-              hash: transition === "replacement" ? "#config-section-tts" : "",
-            }),
-          });
-          flush();
-        }
-        const nextScroll = vi.fn();
-        if (transition === "replacement") {
-          expectDefined(
-            page.querySelector<HTMLElement>("#config-section-tts"),
-            "rendered Voice section",
-          ).scrollIntoView = nextScroll;
-          expect(frames.size).toBe(1);
-        } else {
-          expect(frames.size).toBe(0);
-        }
-        const pending = [...frames.values()];
-        frames.clear();
-        for (const frame of pending) {
-          frame(0);
-        }
-        expect(previousScroll).not.toHaveBeenCalled();
-        expect(nextScroll).toHaveBeenCalledTimes(transition === "replacement" ? 1 : 0);
-      },
-    );
-  });
+      if (transition === "disconnect") {
+        view.dispose();
+      } else {
+        view.update({
+          routeData:
+            transition === "replacement"
+              ? communicationsRoute("?section=tts", "#config-section-tts")
+              : communicationsRoute(),
+        });
+      }
+      const nextScroll = vi.fn();
+      if (transition === "replacement") {
+        query(page, "#config-section-tts").scrollIntoView = nextScroll;
+        expect(frames.size).toBe(1);
+      } else {
+        expect(frames.size).toBe(0);
+      }
+      const pending = [...frames.values()];
+      frames.clear();
+      for (const frame of pending) {
+        frame(0);
+      }
+      expect(previousScroll).not.toHaveBeenCalled();
+      expect(nextScroll).toHaveBeenCalledTimes(transition === "replacement" ? 1 : 0);
+    },
+  );
 });
 
 describe("ConfigPage model catalog lifecycle", () => {
@@ -432,23 +366,15 @@ describe("ConfigPage model catalog lifecycle", () => {
     vi.useFakeTimers();
   });
 
-  afterEach(async () => {
-    cleanupSolid();
-    document.body.replaceChildren();
-    vi.restoreAllMocks();
-    vi.unstubAllGlobals();
-    vi.useRealTimers();
-  });
-
   async function mount(
     client: GatewayBrowserClient,
     scopes: readonly string[] = ["operator.admin"],
   ) {
-    const source = createApplicationGateway({
+    const source = gatewaySource({
       client,
       phase: "connected",
       hello: gatewayHelloForMethods(["system.info"], scopes),
-    } as ApplicationGatewaySnapshot);
+    });
     const context = {
       gateway: source.gateway,
       runtimeConfig: { state: { configSnapshot: {}, configSchema: {} } },
@@ -463,14 +389,11 @@ describe("ConfigPage model catalog lifecycle", () => {
   }
 
   function observerModels(view: ReturnType<typeof mountConfigPage>) {
-    const picker = expectDefined(
-      view.page.querySelector<
-        HTMLElement & {
-          params: { options: Array<{ value: string; label: string }> };
-        }
-      >("#settings-appearance-sidebar openclaw-select-picker"),
-      "observer model picker",
-    );
+    const picker = query<
+      HTMLElement & {
+        params: { options: Array<{ value: string; label: string }> };
+      }
+    >(view.page, "#settings-appearance-sidebar openclaw-select-picker");
     return picker.params.options.slice(2).map(({ value, label }) => ({ value, label }));
   }
 
@@ -489,232 +412,212 @@ describe("ConfigPage model catalog lifecycle", () => {
     return request.mock.calls.filter(([method]) => method === "system.info");
   }
 
-  describe("ConfigPage session observer models", () => {
-    it("keeps session-only Appearance usable without polling host details or models", async () => {
-      const request = vi.fn().mockResolvedValue({});
-      const { view, source } = await mount({ request } as unknown as GatewayBrowserClient, [
-        "operator.sessions.read",
-      ]);
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(request).not.toHaveBeenCalled();
-      await expectModels(view);
-      source.publish({
-        ...source.gateway.snapshot,
-        hello: gatewayHelloForMethods(["system.info"]),
-      });
-      flush();
-      await waitForSolid(() => expect(statusReads(request)).toHaveLength(1));
-      source.publish({
-        ...source.gateway.snapshot,
-        hello: gatewayHelloForMethods(["system.info"], ["operator.sessions.read"]),
-      });
-      flush();
-      await vi.advanceTimersByTimeAsync(30_000);
-      await waitForSolid(() => expect(statusReads(request)).toHaveLength(1));
-      await expectModels(view);
+  it("keeps session-only Appearance usable without polling host details or models", async () => {
+    const request = vi.fn().mockResolvedValue({});
+    const { view, source } = await mount({ request } as unknown as GatewayBrowserClient, [
+      "operator.sessions.read",
+    ]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(request).not.toHaveBeenCalled();
+    await expectModels(view);
+    source.publish({
+      ...source.gateway.snapshot,
+      hello: gatewayHelloForMethods(["system.info"]),
     });
-
-    it("pauses hidden status reads and resumes one ten-second poll when visible", async () => {
-      let visibility: DocumentVisibilityState = "hidden";
-      vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
-      const request = vi.fn((method: string) =>
-        Promise.resolve(method === "models.list" ? { models: [] } : {}),
-      );
-      const { view } = await mount({ request } as unknown as GatewayBrowserClient);
-      const reads = () => statusReads(request);
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(reads()).toHaveLength(0);
-
-      visibility = "visible";
-      document.dispatchEvent(new Event("visibilitychange"));
-      globalThis.dispatchEvent(new Event("focus"));
-      flush();
-      expect(reads()).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(9_999);
-      expect(reads()).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(reads()).toHaveLength(2);
-
-      visibility = "hidden";
-      document.dispatchEvent(new Event("visibilitychange"));
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(reads()).toHaveLength(2);
-      view.dispose();
-      visibility = "visible";
-      document.dispatchEvent(new Event("visibilitychange"));
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(reads()).toHaveLength(2);
+    flush();
+    await waitForSolid(() => expect(statusReads(request)).toHaveLength(1));
+    source.publish({
+      ...source.gateway.snapshot,
+      hello: gatewayHelloForMethods(["system.info"], ["operator.sessions.read"]),
     });
+    flush();
+    await vi.advanceTimersByTimeAsync(30_000);
+    await waitForSolid(() => expect(statusReads(request)).toHaveLength(1));
+    await expectModels(view);
+  });
 
-    it.each(["client", "source"] as const)(
-      "fences a pending catalog after Gateway %s replacement",
-      async (replacement) => {
-        const first = deferred<ModelCatalogResult>();
-        const second = deferred<ModelCatalogResult>();
-        vi.spyOn(modelCatalogStore, "loadModelCatalog")
-          .mockReturnValueOnce(first.promise)
-          .mockReturnValueOnce(second.promise);
-        const firstClient = {
-          request: vi.fn().mockResolvedValue({}),
-        } as unknown as GatewayBrowserClient;
-        const secondClient =
-          replacement === "client"
-            ? ({ request: vi.fn().mockResolvedValue({}) } as unknown as GatewayBrowserClient)
-            : firstClient;
-        const { view, source, context } = await mount(firstClient);
-        await waitForSolid(() => expect(modelCatalogStore.loadModelCatalog).toHaveBeenCalledOnce());
-        const snapshot = { ...source.gateway.snapshot, client: secondClient };
-        if (replacement === "source") {
-          view.setContext({ ...context, gateway: createApplicationGateway(snapshot).gateway });
-        } else {
-          source.publish(snapshot);
-        }
-        flush();
-        const currentModels = [{ id: "small", name: "Small", provider: "openai" }];
-        second.resolve({ models: currentModels });
-        flush();
-        await expectModels(view, currentModels);
+  it("pauses hidden status reads and resumes one ten-second poll when visible", async () => {
+    let visibility: DocumentVisibilityState = "hidden";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    const request = emptyRequest();
+    const { view } = await mount({ request } as unknown as GatewayBrowserClient);
+    const reads = () => statusReads(request);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(reads()).toHaveLength(0);
 
-        first.resolve({ models: [{ id: "stale", name: "Stale", provider: "old" }] });
-        await first.promise;
-        flush();
-        await expectModels(view, currentModels);
-        expect(modelCatalogStore.loadModelCatalog).toHaveBeenCalledTimes(2);
-        expect(modelCatalogStore.loadModelCatalog).toHaveBeenNthCalledWith(1, firstClient, {
+    visibility = "visible";
+    document.dispatchEvent(new Event("visibilitychange"));
+    globalThis.dispatchEvent(new Event("focus"));
+    flush();
+    expect(reads()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(reads()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(reads()).toHaveLength(2);
+
+    visibility = "hidden";
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(reads()).toHaveLength(2);
+    view.dispose();
+    visibility = "visible";
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(reads()).toHaveLength(2);
+  });
+
+  it.each(["client", "source"] as const)(
+    "fences a pending catalog after Gateway %s replacement",
+    async (replacement) => {
+      const first = deferred<ModelCatalogResult>();
+      const second = deferred<ModelCatalogResult>();
+      vi.spyOn(modelCatalogStore, "loadModelCatalog")
+        .mockReturnValueOnce(first.promise)
+        .mockReturnValueOnce(second.promise);
+      const firstClient = {
+        request: vi.fn().mockResolvedValue({}),
+      } as unknown as GatewayBrowserClient;
+      const secondClient =
+        replacement === "client"
+          ? ({ request: vi.fn().mockResolvedValue({}) } as unknown as GatewayBrowserClient)
+          : firstClient;
+      const { view, source, context } = await mount(firstClient);
+      await waitForSolid(() => expect(modelCatalogStore.loadModelCatalog).toHaveBeenCalledOnce());
+      const snapshot = { ...source.gateway.snapshot, client: secondClient };
+      if (replacement === "source") {
+        view.setContext({ ...context, gateway: createApplicationGateway(snapshot).gateway });
+      } else {
+        source.publish(snapshot);
+      }
+      flush();
+      const currentModels = catalogModels("small", "Small");
+      second.resolve({ models: currentModels });
+      flush();
+      await expectModels(view, currentModels);
+
+      first.resolve({ models: catalogModels("stale", "Stale", "old") });
+      await first.promise;
+      flush();
+      await expectModels(view, currentModels);
+      expect(modelCatalogStore.loadModelCatalog).toHaveBeenCalledTimes(2);
+      for (const [index, client] of [firstClient, secondClient].entries()) {
+        expect(modelCatalogStore.loadModelCatalog).toHaveBeenNthCalledWith(index + 1, client, {
           agentId: "main",
           preparedOnly: true,
           signal: expect.any(AbortSignal),
         });
-        expect(modelCatalogStore.loadModelCatalog).toHaveBeenNthCalledWith(2, secondClient, {
-          agentId: "main",
-          preparedOnly: true,
-          signal: expect.any(AbortSignal),
-        });
-      },
+      }
+    },
+  );
+
+  it("keeps same-client agent switches from restoring stale observer models", async () => {
+    const firstMain = deferred<ModelCatalogResult>();
+    const writer = deferred<ModelCatalogResult>();
+    const secondMain = deferred<ModelCatalogResult>();
+    let mainRequests = 0;
+    const request = vi.fn((method: string, params: unknown) => {
+      if (method === "system.info") {
+        return Promise.resolve({});
+      }
+      const agentId = (params as { agentId?: string }).agentId;
+      if (agentId === "writer") {
+        return writer.promise;
+      }
+      mainRequests += 1;
+      return mainRequests === 1 ? firstMain.promise : secondMain.promise;
+    });
+    const client = { request } as unknown as GatewayBrowserClient;
+    const { view, context } = await mount(client);
+    await waitForSolid(() => expect(mainRequests).toBe(1));
+    const selection = context.settingsAgentSelection.state as { selectedId: string | null };
+    selection.selectedId = "writer";
+    publishConfigSource(context.settingsAgentSelection);
+    const writerModels = catalogModels("writer-model", "Writer Model");
+    writer.resolve({ models: writerModels });
+    flush();
+    await expectModels(view, writerModels);
+
+    selection.selectedId = "main";
+    publishConfigSource(context.settingsAgentSelection);
+    const currentMainModels = catalogModels("current-main", "Current Main");
+    await waitForSolid(() => expect(mainRequests).toBe(2));
+    await expectModels(view);
+    firstMain.resolve({ models: catalogModels("stale-main", "Stale Main") });
+    flush();
+    expect(mainRequests).toBe(2);
+    await expectModels(view);
+    secondMain.resolve({ models: currentMainModels });
+    flush();
+    await expectModels(view, currentMainModels);
+    expect(request.mock.calls.filter(([method]) => method === "models.list")).toEqual(
+      ["main", "writer", "main"].map((agentId) => [
+        "models.list",
+        { agentId, preparedOnly: true, view: "configured" },
+      ]),
     );
 
-    it("keeps same-client agent switches from restoring stale observer models", async () => {
-      const firstMain = deferred<ModelCatalogResult>();
-      const writer = deferred<ModelCatalogResult>();
-      const secondMain = deferred<ModelCatalogResult>();
-      let mainRequests = 0;
-      const request = vi.fn((method: string, params: unknown) => {
-        if (method === "system.info") {
-          return Promise.resolve({});
-        }
-        const agentId = (params as { agentId?: string }).agentId;
-        if (agentId === "writer") {
-          return writer.promise;
-        }
-        mainRequests += 1;
-        return mainRequests === 1 ? firstMain.promise : secondMain.promise;
-      });
-      const client = { request } as unknown as GatewayBrowserClient;
-      const { view, context } = await mount(client);
-      await waitForSolid(() => expect(mainRequests).toBe(1));
-      const selection = context.settingsAgentSelection.state as { selectedId: string | null };
-      selection.selectedId = "writer";
-      publishConfigSource(context.settingsAgentSelection);
-      flush();
-      const writerModels = [{ id: "writer-model", name: "Writer Model", provider: "openai" }];
-      writer.resolve({ models: writerModels });
-      flush();
-      await expectModels(view, writerModels);
+    selection.selectedId = null;
+    publishConfigSource(context.settingsAgentSelection);
+    await expectModels(view);
+    await waitForSolid(() =>
+      expect(view.page.textContent).toContain("Explicit model catalog unavailable"),
+    );
+    expect(request.mock.calls.filter(([method]) => method === "models.list")).toHaveLength(3);
+  });
 
-      selection.selectedId = "main";
-      publishConfigSource(context.settingsAgentSelection);
-      flush();
-      const currentMainModels = [{ id: "current-main", name: "Current Main", provider: "openai" }];
-      await waitForSolid(() => expect(mainRequests).toBe(2));
-      await expectModels(view);
-      firstMain.resolve({ models: [{ id: "stale-main", name: "Stale Main", provider: "openai" }] });
-      flush();
-      expect(mainRequests).toBe(2);
-      await expectModels(view);
-      secondMain.resolve({ models: currentMainModels });
-      flush();
-      await expectModels(view, currentMainModels);
-      expect(request.mock.calls.filter(([method]) => method === "models.list")).toEqual(
-        ["main", "writer", "main"].map((agentId) => [
-          "models.list",
-          { agentId, preparedOnly: true, view: "configured" },
-        ]),
-      );
-
-      selection.selectedId = null;
-      publishConfigSource(context.settingsAgentSelection);
-      flush();
-      await expectModels(view);
-      await waitForSolid(() =>
-        expect(view.page.textContent).toContain("Explicit model catalog unavailable"),
-      );
-      expect(request.mock.calls.filter(([method]) => method === "models.list")).toHaveLength(3);
+  it("keeps a slow refresh through status polls and retires its page reader on detach", async () => {
+    const stale = deferred<ModelCatalogResult>();
+    const original = catalogModels("original", "Original");
+    const fresh = catalogModels("fresh", "Fresh");
+    let catalogReads = 0;
+    const request = vi.fn((method: string) => {
+      if (method === "system.info") {
+        return Promise.resolve({});
+      }
+      catalogReads += 1;
+      if (catalogReads !== 2) {
+        return Promise.resolve({ models: catalogReads === 1 ? original : fresh });
+      }
+      return stale.promise;
     });
+    const client = { request } as unknown as GatewayBrowserClient;
+    const { view, context } = await mount(client);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(catalogReads).toBe(1);
 
-    it("keeps a slow refresh through status polls and retires its page reader on detach", async () => {
-      const stale = deferred<ModelCatalogResult>();
-      const original = [{ id: "original", name: "Original", provider: "openai" }];
-      const fresh = [{ id: "fresh", name: "Fresh", provider: "openai" }];
-      let catalogReads = 0;
-      const request = vi.fn((method: string) => {
-        if (method === "system.info") {
-          return Promise.resolve({});
-        }
-        catalogReads += 1;
-        if (catalogReads !== 2) {
-          return Promise.resolve({ models: catalogReads === 1 ? original : fresh });
-        }
-        return stale.promise;
-      });
-      const client = { request } as unknown as GatewayBrowserClient;
-      const { view, context } = await mount(client);
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(catalogReads).toBe(1);
+    // The application retires catalogs on publication; the next status poll reads that generation.
+    invalidateChatMetadataStore(client);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expectModels(view, original);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(statusReads(request)).toHaveLength(6);
+    expect(catalogReads).toBe(2);
+    view.dispose();
+    flush();
 
-      // The application retires catalogs on publication; the next status poll reads that generation.
-      invalidateChatMetadataStore(client);
-      await vi.advanceTimersByTimeAsync(10_000);
-      await expectModels(view, original);
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(statusReads(request)).toHaveLength(6);
-      expect(catalogReads).toBe(2);
-      view.dispose();
-      flush();
+    const remounted = mountConfigPage(context, { pageId: "appearance" });
+    await waitForSolid(() => expect(catalogReads).toBe(3));
+    await expectModels(remounted, fresh);
+    stale.resolve({ models: original });
+    flush();
+    await expectModels(remounted, fresh);
+    expect(catalogReads).toBe(3);
+  });
 
-      const remounted = mountConfigPage(context, { pageId: "appearance" });
-      await waitForSolid(() => expect(catalogReads).toBe(3));
-      await expectModels(remounted, fresh);
-      stale.resolve({ models: original });
-      flush();
-      await expectModels(remounted, fresh);
-      expect(catalogReads).toBe(3);
-    });
-
-    it("stops status polling outside Appearance while the page remains mounted", async () => {
-      const request = vi.fn((method: string) =>
-        Promise.resolve(method === "models.list" ? { models: [] } : {}),
-      );
-      const { view } = await mount({ request } as unknown as GatewayBrowserClient);
-      await waitForSolid(() => expect(statusReads(request)).toHaveLength(1));
-      view.update({ pageId: "advanced" });
-      flush();
-      await vi.advanceTimersByTimeAsync(20_000);
-      expect(view.page.isConnected).toBe(true);
-      await waitForSolid(() => expect(statusReads(request)).toHaveLength(1));
-      view.update({ pageId: "appearance" });
-      flush();
-      await waitForSolid(() => expect(statusReads(request)).toHaveLength(2));
-    });
+  it("stops status polling outside Appearance while the page remains mounted", async () => {
+    const request = emptyRequest();
+    const { view } = await mount({ request } as unknown as GatewayBrowserClient);
+    await waitForSolid(() => expect(statusReads(request)).toHaveLength(1));
+    view.update({ pageId: "advanced" });
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(view.page.isConnected).toBe(true);
+    await waitForSolid(() => expect(statusReads(request)).toHaveLength(1));
+    view.update({ pageId: "appearance" });
+    await waitForSolid(() => expect(statusReads(request)).toHaveLength(2));
   });
 });
 
 describe("ConfigPage meeting capture", () => {
-  afterEach(() => {
-    cleanupSolid();
-    document.body.replaceChildren();
-    vi.restoreAllMocks();
-  });
-
   it("keeps Messages default and opens capture with a collapsed schema editor inside the section panel", async () => {
     const config = { messages: { ackReaction: "ok" }, transcripts: { enabled: true } };
     const request = vi.fn(async (method: string) => {
@@ -723,14 +626,11 @@ describe("ConfigPage meeting capture", () => {
       }
       if (method === "config.schema") {
         return {
-          schema: {
-            type: "object",
-            properties: {
-              messages: { type: "object", properties: { ackReaction: { type: "string" } } },
-              tts: { type: "object", properties: { enabled: { type: "boolean" } } },
-              transcripts: { type: "object", properties: { enabled: { type: "boolean" } } },
-            },
-          },
+          schema: objectSchema({
+            messages: fieldSchema("ackReaction", "string"),
+            tts: fieldSchema("enabled", "boolean"),
+            transcripts: fieldSchema("enabled", "boolean"),
+          }),
           uiHints: {},
         };
       }
@@ -755,25 +655,25 @@ describe("ConfigPage meeting capture", () => {
         overlays: { snapshot: { updateRunning: false, updateReconciliationPending: false } },
       } as unknown as ApplicationContext;
       const view = mountConfigPage(context, { pageId: "communications" });
-      const container = view.container;
-      flush();
-      expect(container.querySelector("openclaw-meeting-capture-settings")).toBeNull();
-      const captureTab = container.querySelector<HTMLElement>(
-        '.hub-tab[data-tab-value="transcripts"]',
-      )!;
+      const { container } = view;
+      const captureSettings = () => container.querySelector("openclaw-meeting-capture-settings");
+      const tab = (name: string) => query(container, `.hub-tab[data-tab-value="${name}"]`);
+      const enter = (element: HTMLElement) =>
+        element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      expect(captureSettings()).toBeNull();
+      const captureTab = tab("transcripts");
       expect(captureTab.textContent?.trim()).toBe("Meeting capture");
       const tabs = captureTab.closest(".hub-tabs")!;
       expect(tabs.querySelector("[active]")?.getAttribute("data-tab-value")).toBe("messages");
-      captureTab.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      enter(captureTab);
       flush();
-      const capture = container.querySelector("openclaw-meeting-capture-settings") as HTMLElement;
+      const capture = query(container, "openclaw-meeting-capture-settings");
       expect(container.querySelector("#config-section-panel")?.contains(capture)).toBe(true);
       flush();
-      const advanced = capture.querySelector<HTMLDetailsElement>("details")!;
-      expect(advanced).not.toBeNull();
+      const advanced = query<HTMLDetailsElement>(capture, "details");
       expect(advanced.open).toBe(false);
       expect(advanced.querySelector("#config-section-transcripts")).not.toBeNull();
-      const toggle = capture.querySelector<HTMLInputElement>(".settings-toggle__input")!;
+      const toggle = query<HTMLInputElement>(capture, ".settings-toggle__input");
       toggle.checked = false;
       toggle.dispatchEvent(new Event("change"));
       expect(runtimeConfig.state.configForm).toMatchObject({ transcripts: { enabled: false } });
@@ -786,23 +686,20 @@ describe("ConfigPage meeting capture", () => {
         advanced.addEventListener("toggle", () => resolve(), { once: true });
       });
       view.update({
-        routeData: configRouteData({
-          pathname: "/settings/communications",
-          search: "?section=transcripts&advanced=1",
-          hash: "#config-section-transcripts",
-        }),
+        routeData: communicationsRoute(
+          "?section=transcripts&advanced=1",
+          "#config-section-transcripts",
+        ),
       });
       await waitForSolid(() => expect(advanced.open).toBe(true));
-      expect(container.querySelector("openclaw-meeting-capture-settings")).toBe(capture);
+      expect(captureSettings()).toBe(capture);
       expect(capture.querySelector("details")).toBe(advanced);
       await advancedToggled;
-      const messagesTab = container.querySelector<HTMLElement>(
-        '.hub-tab[data-tab-value="messages"]',
-      )!;
+      const messagesTab = tab("messages");
       messagesTab.focus();
-      messagesTab.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      enter(messagesTab);
       flush();
-      expect(container.querySelector("openclaw-meeting-capture-settings")).toBeNull();
+      expect(captureSettings()).toBeNull();
       flush();
       expect(document.activeElement).toBe(messagesTab);
     } finally {

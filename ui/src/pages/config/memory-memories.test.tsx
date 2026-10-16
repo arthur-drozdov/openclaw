@@ -1,66 +1,31 @@
 /* @vitest-environment jsdom */
 
 import { createSignal } from "solid-js";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { MemorySearchResponse } from "../../../../src/gateway/server-methods/memory-search.ts";
 import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import { mountSolid } from "../../test-helpers/mount-solid.ts";
 import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
-import { MemoryMemories, type MemoryMemoriesProps } from "./memory-memories.tsx";
+import { MemoryMemories } from "./memory-memories.tsx";
 
 type Request = (method: string, params: Record<string, unknown>) => Promise<unknown>;
-type MemoryMemoriesTestElement = HTMLElement & {
-  client: GatewayBrowserClient | null;
-  connected: boolean;
-  methodAdvertised: boolean;
-  agentId: string | null;
-};
-
-const elements: HTMLElement[] = [];
-afterEach(() => elements.splice(0).forEach((element) => element.remove()));
-
 function createElement(request: Request, advertised = true) {
-  const input: MemoryMemoriesProps = {
-    client: { request } as unknown as GatewayBrowserClient,
-    connected: true,
-    methodAdvertised: advertised,
-    agentId: "main",
-  };
-  const element = Object.assign(document.createElement("div"), input);
-  const [revision, setRevision] = createSignal(0);
-  for (const key of ["client", "connected", "methodAdvertised", "agentId"] as const) {
-    Object.defineProperty(element, key, {
-      get: () => input[key],
-      set: (value: unknown) => {
-        Object.assign(input, { [key]: value });
-        setRevision((current) => current + 1);
-      },
-    });
-  }
-  document.body.append(element);
-  elements.push(element);
-  const { unmount } = mountSolid(
-    () => (
-      <MemoryMemories
-        client={(revision(), input.client)}
-        connected={(revision(), input.connected)}
-        methodAdvertised={(revision(), input.methodAdvertised)}
-        agentId={(revision(), input.agentId)}
-      />
-    ),
-    { container: element },
-  );
-  const remove = element.remove.bind(element);
-  element.remove = () => {
-    unmount();
-    remove();
-  };
+  const [agentId, setAgentId] = createSignal<string | null>("main");
+  const client = { request } as unknown as GatewayBrowserClient;
+  const { container, unmount } = mountSolid(() => (
+    <MemoryMemories
+      client={client}
+      connected={true}
+      methodAdvertised={advertised}
+      agentId={agentId()}
+    />
+  ));
   flush();
-  return element;
+  return Object.assign(container, { setAgentId, unmount });
 }
 
-function typeQuery(element: MemoryMemoriesTestElement, query: string) {
+function typeQuery(element: HTMLElement, query: string) {
   flush();
   const input = element.querySelector<HTMLInputElement>("#memory-search-input");
   if (!input) {
@@ -71,10 +36,15 @@ function typeQuery(element: MemoryMemoriesTestElement, query: string) {
   flush();
 }
 
-function submit(element: MemoryMemoriesTestElement) {
+function submit(element: HTMLElement) {
   element
     .querySelector("form")
     ?.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+}
+
+function search(element: HTMLElement, query = "Ada") {
+  typeQuery(element, query);
+  submit(element);
 }
 
 const result = {
@@ -86,27 +56,19 @@ const result = {
   source: "memory" as const,
 };
 
-function searchResponse(results: MemorySearchResponse["results"]) {
-  return { agentId: "main", provider: "local", searchMode: "hybrid", results };
+function searchResponse(
+  results: MemorySearchResponse["results"],
+  overrides: Partial<MemorySearchResponse> = {},
+) {
+  return { agentId: "main", provider: "local", searchMode: "hybrid", results, ...overrides };
 }
 
 function fileReads(request: { mock: { calls: Array<[string, ...unknown[]]> } }) {
   return request.mock.calls.filter(([method]) => method === "agents.workspace.get");
 }
 
-function memoryFileResponse(content: string, path = result.path) {
-  return {
-    agentId: "main",
-    file: {
-      path,
-      name: path.split("/").at(-1),
-      size: content.length,
-      updatedAtMs: 1,
-      mimeType: "text/plain",
-      encoding: "utf8",
-      content,
-    },
-  };
+function memoryFileResponse(content: string) {
+  return { file: { encoding: "utf8", content } };
 }
 
 describe("MemoryMemoriesElement", () => {
@@ -115,7 +77,7 @@ describe("MemoryMemoriesElement", () => {
     flush();
     expect(current.textContent).toContain("Search for a person, project, decision");
     expect(current.querySelector("form")).not.toBeNull();
-    current.remove();
+    current.unmount();
 
     const old = createElement(
       vi.fn(() => Promise.resolve({})),
@@ -124,13 +86,13 @@ describe("MemoryMemoriesElement", () => {
     flush();
     expect(old.textContent).toContain("Update the gateway to search memories");
     expect(old.querySelector("form")).toBeNull();
-    old.remove();
+    old.unmount();
   });
 
   it("keeps search disabled when no agent is available", async () => {
     const request = vi.fn(() => Promise.resolve({}));
     const element = createElement(request);
-    element.agentId = null;
+    element.setAgentId(null);
     typeQuery(element, "Ada");
     expect(element.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true);
     submit(element);
@@ -141,15 +103,9 @@ describe("MemoryMemoriesElement", () => {
     const request = vi
       .fn<Request>()
       .mockRejectedValueOnce(new Error("index unavailable"))
-      .mockResolvedValueOnce({
-        agentId: "main",
-        provider: "none",
-        searchMode: "fts-only",
-        results: [],
-      });
+      .mockResolvedValueOnce(searchResponse([], { provider: "none", searchMode: "fts-only" }));
     const element = createElement(request);
-    typeQuery(element, "missing");
-    submit(element);
+    search(element, "missing");
     await waitForSolid(() => expect(element.textContent).toContain("index unavailable"));
 
     const retry = [...element.querySelectorAll("button")].find(
@@ -172,11 +128,10 @@ describe("MemoryMemoriesElement", () => {
       }
       return params.path === result.path
         ? pending.promise
-        : Promise.resolve(memoryFileResponse("Another memory file", third.path));
+        : Promise.resolve(memoryFileResponse("Another memory file"));
     });
     const element = createElement(request);
-    typeQuery(element, "Ada");
-    submit(element);
+    search(element);
     await waitForSolid(() => expect(element.querySelectorAll("article")).toHaveLength(3));
 
     const rows = element.querySelectorAll<HTMLButtonElement>("article > button");
@@ -229,8 +184,7 @@ describe("MemoryMemoriesElement", () => {
       Promise.resolve(searchResponse([{ ...result, path: "MEMORY.md" }, ...nonExpandable])),
     );
     const element = createElement(request);
-    typeQuery(element, "memory");
-    submit(element);
+    search(element, "memory");
     await waitForSolid(() => expect(element.querySelectorAll("article")).toHaveLength(6));
 
     expect(element.querySelectorAll("article > button")).toHaveLength(1);
@@ -245,8 +199,7 @@ describe("MemoryMemoriesElement", () => {
         : Promise.reject(new Error("workspace file not found")),
     );
     const element = createElement(request);
-    typeQuery(element, "Ada");
-    submit(element);
+    search(element);
     await waitForSolid(() => expect(element.querySelector("article > button")).not.toBeNull());
     element.querySelector<HTMLButtonElement>("article > button")?.click();
 
@@ -262,11 +215,10 @@ describe("MemoryMemoriesElement", () => {
   it("resets results when the selected agent changes", async () => {
     const request = vi.fn(() => Promise.resolve(searchResponse([result])));
     const element = createElement(request);
-    typeQuery(element, "Ada");
-    submit(element);
+    search(element);
     await waitForSolid(() => expect(element.textContent).toContain(result.snippet));
 
-    element.agentId = "research";
+    element.setAgentId("research");
     await waitForSolid(() => expect(element.textContent).toContain("Search for a person"));
     expect(element.textContent).not.toContain(result.snippet);
     expect(element.querySelector<HTMLInputElement>("#memory-search-input")?.value).toBe("");
@@ -286,8 +238,7 @@ describe("MemoryMemoriesElement", () => {
       });
       const element = createElement(request);
       for (const query of ["Ada", "Ada again"]) {
-        typeQuery(element, query);
-        submit(element);
+        search(element, query);
         flush();
         await waitForSolid(() => expect(element.querySelector("article > button")).not.toBeNull());
         element.querySelector<HTMLButtonElement>("article > button")?.click();
@@ -324,25 +275,19 @@ describe("MemoryMemoriesElement", () => {
     const fresh = { ...result, snippet: "Freshly indexed Ada prefers careful reviews." };
     const request = vi
       .fn<Request>()
-      .mockResolvedValueOnce({
-        agentId: "main",
-        provider: "none",
-        searchMode: "fts-only",
-        results: [],
-        stale: true,
-        warning,
-        action,
-      })
-      .mockResolvedValueOnce({
-        agentId: "main",
-        provider: "none",
-        searchMode: "fts-only",
-        results: [fresh],
-      });
+      .mockResolvedValueOnce(
+        searchResponse([], {
+          provider: "none",
+          searchMode: "fts-only",
+          stale: true,
+          warning,
+          action,
+        }),
+      )
+      .mockResolvedValueOnce(searchResponse([fresh], { provider: "none", searchMode: "fts-only" }));
     const element = createElement(request);
     const readText = () => (element.textContent ?? "").replace(/\s+/gu, " ").trim();
-    typeQuery(element, "Ada");
-    submit(element);
+    search(element);
     await waitForSolid(() =>
       expect(element.querySelector(".memory-memories__results-heading")).not.toBeNull(),
     );
@@ -350,8 +295,7 @@ describe("MemoryMemoriesElement", () => {
     expect.soft(readText(), "stale result warning").toContain(warning);
     expect.soft(readText(), "agent-scoped recovery guidance").toContain(action);
 
-    typeQuery(element, "Ada fresh");
-    submit(element);
+    search(element, "Ada fresh");
     await waitForSolid(() => expect(readText()).toContain(fresh.snippet));
     expect(readText()).not.toContain(warning);
     expect(readText()).not.toContain(action);
