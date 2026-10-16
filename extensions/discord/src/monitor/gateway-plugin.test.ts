@@ -63,7 +63,10 @@ vi.mock("../internal/gateway.js", () => ({
 }));
 
 const webSocketConstructor = vi.hoisted(() => vi.fn());
-vi.mock("../internal/ws-runtime.js", () => ({ WebSocket: webSocketConstructor }));
+vi.mock("../internal/ws-runtime.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../internal/ws-runtime.js")>()),
+  WebSocket: webSocketConstructor,
+}));
 
 const captureHost = vi.hoisted(() => ({
   capture: vi.fn<typeof import("openclaw/plugin-sdk/proxy-capture").captureWsEventAsync>(),
