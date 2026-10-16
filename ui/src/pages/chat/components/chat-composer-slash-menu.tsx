@@ -91,7 +91,7 @@ export function getActiveSlashMenuOptionLabel(state: SlashMenuState): string {
 export function createSlashMenu() {
   let refreshPending = false;
   let refreshGeneration = 0;
-  const [state, setState] = createStore<SlashMenuState>({
+  const [presentation, setState] = createStore<SlashMenuState>({
     slashMenuOpen: false,
     slashMenuItems: [],
     slashMenuIndex: 0,
@@ -482,7 +482,7 @@ export function createSlashMenu() {
   }
 
   return {
-    state,
+    state: presentation,
     update(value: string, host: SlashMenuHost) {
       let open = false;
       setState((draft) => {

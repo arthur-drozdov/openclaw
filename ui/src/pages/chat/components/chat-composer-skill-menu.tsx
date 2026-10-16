@@ -106,7 +106,7 @@ export function getActiveSkillMenuOptionLabel(state: SkillMenuState): string {
 export function createSkillMenu() {
   let generation = 0;
   let refreshTargetStart: number | null = null;
-  const [state, setState] = createStore<SkillMenuState>({
+  const [presentation, setState] = createStore<SkillMenuState>({
     skillMenuOpen: false,
     skillMenuItems: [],
     skillMenuIndex: 0,
@@ -246,7 +246,7 @@ export function createSkillMenu() {
   }
 
   return {
-    state,
+    state: presentation,
     update(value: string, caret: number, host: SkillMenuHost) {
       let open = false;
       setState((draft) => {

@@ -35,7 +35,7 @@ import { resolveChatSlashCommandArgOptions, resolveComposerMenus } from "./chat-
 import type { ComposerPredictionController } from "./chat-composer-prediction.ts";
 import { resolveComposerQuestionPanel } from "./chat-composer-question.tsx";
 import { isSkillMenuVisible, type SkillMenuHost } from "./chat-composer-skill-menu.tsx";
-import { type SlashMenuHost } from "./chat-composer-slash-menu.tsx";
+import type { SlashMenuHost } from "./chat-composer-slash-menu.tsx";
 import {
   clearPendingClearedSubmittedDraft,
   commitComposerDraft,
@@ -666,9 +666,8 @@ export function createChatComposerContext(
     onPrimaryActionPointerDown: (event) =>
       preserveComposerFocusOnPrimaryAction(event, state.composerTextarea),
   };
-  const clearSlashMenu = Boolean(
-    props.modelSwitching && state.slashMenu.state.slashMenuCommand?.key === "think",
-  );
+  const clearSlashMenu =
+    props.modelSwitching && state.slashMenu.state.slashMenuCommand?.key === "think";
   if (
     !canCompose ||
     state.composerComposing ||
