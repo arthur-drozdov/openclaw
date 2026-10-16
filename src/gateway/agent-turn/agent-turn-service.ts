@@ -110,7 +110,6 @@ export function createAgentTurnService(
     const dedupeLifecycle = createAgentDedupeLifecycle({
       ...preflight,
       privateCompletion,
-      lifecycleGeneration,
       ownerConnId,
       ownerDeviceId,
       context,
@@ -237,7 +236,6 @@ export function createAgentTurnService(
         const admissionController = createAgentAdmissionController({
           assertAdmissionCurrent,
           runId,
-          lifecycleGeneration,
           agentDedupeKeys,
           preAcceptedReservedSessionKey,
           expectedSession,
@@ -283,7 +281,6 @@ export function createAgentTurnService(
           client: principal,
           context,
           respond,
-          abortForLifecycleRotation: dedupeLifecycle.abortForLifecycleRotation,
           setCommittedResetCompletion: dedupeLifecycle.setCommittedResetCompletion,
         });
         requestedSessionKey = resetPhase.requestedSessionKey;
@@ -461,7 +458,6 @@ export function createAgentTurnService(
             requestedBestEffortDeliver,
             expectedSession,
             maintenanceConfig: sessionMaintenanceConfig,
-            abortForLifecycleRotation: dedupeLifecycle.abortForLifecycleRotation,
             assertGatewayWorkAdmissionAllowed: admissionController.assertAllowed,
             respondToGatewayAdmissionOutcome: admissionController.respondToOutcome,
             setCronContinuationClaim: cronContinuation.setClaim,
@@ -533,7 +529,6 @@ export function createAgentTurnService(
           privateCompletion,
           replyExpectation,
           settleWakeReplay,
-          abortForLifecycleRotation: dedupeLifecycle.abortForLifecycleRotation,
           acquireGatewayWorkAdmission: admissionController.acquire,
           assertGatewayWorkAdmissionAllowed: admissionController.assertAllowed,
           hasGatewayAdmissionOutcome: admissionController.hasOutcome,

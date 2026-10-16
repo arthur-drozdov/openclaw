@@ -209,19 +209,6 @@ describe("createLazyGatewayCronState", () => {
     expect(cron["wake"]).toHaveBeenCalledExactlyOnceWith({ mode: "now", text: "ping" });
   });
 
-  it("starts the loaded cron service once", async () => {
-    const cron = createCronService();
-    hoisted.setState(createCronState(cron));
-
-    const lazy = createLazyGatewayCronState(createParams());
-
-    await lazy.cron.start();
-    await lazy.cron.start();
-
-    expect(hoisted.buildGatewayCronService).toHaveBeenCalledTimes(1);
-    expect(cron["start"]).toHaveBeenCalledTimes(1);
-  });
-
   it.each(["run", "enqueueRun"] as const)(
     "finishes startup recovery before admitting a manual %s",
     async (operation) => {
@@ -248,8 +235,6 @@ describe("createLazyGatewayCronState", () => {
       await run;
 
       expect(cron[operation]).toHaveBeenCalledExactlyOnceWith("demo", "force");
-      await lazy.cron.start();
-      expect(start).toHaveBeenCalledOnce();
     },
   );
 
@@ -288,26 +273,6 @@ describe("createLazyGatewayCronState", () => {
     expect(cron["stop"]).toHaveBeenCalledTimes(1);
   });
 
-  it("restarts after stop interrupts an in-flight startup", async () => {
-    const finishFirstStart = deferred();
-    const cron = createCronService();
-    cron.start = vi
-      .fn()
-      .mockImplementationOnce(async () => await finishFirstStart.promise)
-      .mockResolvedValueOnce(undefined);
-    hoisted.setState(createCronState(cron));
-    const lazy = createLazyGatewayCronState(createParams());
-
-    const firstStart = lazy.cron.start();
-    await vi.waitFor(() => expect(cron["start"]).toHaveBeenCalledOnce());
-    lazy.cron.stop();
-    const restarted = lazy.cron.start();
-    finishFirstStart.resolve();
-    await Promise.all([firstStart, restarted]);
-
-    expect(cron["start"]).toHaveBeenCalledTimes(2);
-  });
-
   it("keeps wake non-blocking before the cron service is loaded", async () => {
     const cron = createCronService();
     hoisted.setState(createCronState(cron));
@@ -322,87 +287,24 @@ describe("createLazyGatewayCronState", () => {
     expect(cron["wake"]).not.toHaveBeenCalled();
   });
 
-  it("does not arm a read-loaded scheduler when suspension ends", async () => {
+  it("forwards scheduling intent without loading the cron owner", async () => {
     const cron = createCronService();
     hoisted.setState(createCronState(cron));
     const lazy = createLazyGatewayCronState(createParams());
 
     lazy.cron.pauseScheduling();
     expect(hoisted.buildGatewayCronService).not.toHaveBeenCalled();
+    lazy.cron.resumeScheduling();
+    expect(hoisted.buildGatewayCronService).not.toHaveBeenCalled();
+    lazy.cron.pauseScheduling();
 
     await lazy.cron.status();
     expect(cron["pauseScheduling"]).toHaveBeenCalledOnce();
     lazy.cron.resumeScheduling();
-    expect(cron["resumeScheduling"]).not.toHaveBeenCalled();
-
-    await lazy.cron.start();
     expect(cron["resumeScheduling"]).toHaveBeenCalledOnce();
     lazy.cron.pauseScheduling();
     lazy.cron.resumeScheduling();
     expect(cron["resumeScheduling"]).toHaveBeenCalledTimes(2);
-  });
-
-  it("waits to start while scheduling is paused", async () => {
-    const cron = createCronService();
-    hoisted.setState(createCronState(cron));
-    const lazy = createLazyGatewayCronState(createParams());
-
-    lazy.cron.pauseScheduling();
-    const startPromise = lazy.cron.start();
-    await vi.waitFor(() => expect(lazy.cron.getSuspensionBlockerCount?.()).toBe(1));
-    expect(cron["start"]).not.toHaveBeenCalled();
-
-    lazy.cron.resumeScheduling();
-    await startPromise;
-    expect(cron["start"]).toHaveBeenCalledOnce();
-    expect(lazy.cron.getSuspensionBlockerCount?.()).toBe(0);
-  });
-
-  it("keeps in-flight startup as a blocker until startup settles", async () => {
-    const finishStart = deferred();
-    const cron = createCronService();
-    cron.start = vi.fn(async () => await finishStart.promise);
-    hoisted.setState(createCronState(cron));
-    const lazy = createLazyGatewayCronState(createParams());
-
-    const startPromise = lazy.cron.start();
-    await vi.waitFor(() => expect(cron["start"]).toHaveBeenCalledOnce());
-    expect(lazy.cron.getSuspensionBlockerCount?.()).toBe(1);
-
-    lazy.cron.pauseScheduling();
-    lazy.cron.resumeScheduling();
-    expect(cron["resumeScheduling"]).toHaveBeenCalledOnce();
-    expect(lazy.cron.getSuspensionBlockerCount?.()).toBe(1);
-
-    finishStart.resolve();
-    await startPromise;
-    expect(lazy.cron.getSuspensionBlockerCount?.()).toBe(0);
-  });
-
-  it("resumes a paused scheduler while exit watchers are reconciling", async () => {
-    const reconcileStarted = deferred();
-    const finishReconcile = deferred();
-    const cron = createCronService();
-    hoisted.setState({
-      ...createCronState(cron),
-      reconcileExitWatchers: vi.fn(async () => {
-        reconcileStarted.resolve();
-        await finishReconcile.promise;
-      }),
-    });
-    const lazy = createLazyGatewayCronState(createParams());
-
-    const startPromise = lazy.cron.start();
-    await reconcileStarted.promise;
-    expect(lazy.cron.getSuspensionBlockerCount?.()).toBe(1);
-
-    lazy.cron.pauseScheduling();
-    lazy.cron.resumeScheduling();
-    expect(cron["resumeScheduling"]).toHaveBeenCalledOnce();
-
-    finishReconcile.resolve();
-    await startPromise;
-    expect(lazy.cron.getSuspensionBlockerCount?.()).toBe(0);
   });
 
   it("allows startup to retry after the underlying service rejects", async () => {
@@ -438,22 +340,6 @@ describe("createLazyGatewayCronState", () => {
 
     await lazy.stopStreamWatchers();
     expect(state.stopStreamWatchers).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not reconcile exit watchers when cron is disabled", async () => {
-    const cron = createCronService();
-    const reconcileExitWatchers = vi.fn(async () => {});
-    hoisted.setState({
-      ...createCronState(cron),
-      cronEnabled: false,
-      reconcileExitWatchers,
-    });
-
-    const lazy = createLazyGatewayCronState(createParams({ cron: { enabled: false } }));
-    await lazy.cron.start();
-
-    expect(cron["start"]).toHaveBeenCalledTimes(1);
-    expect(reconcileExitWatchers).not.toHaveBeenCalled();
   });
 });
 
