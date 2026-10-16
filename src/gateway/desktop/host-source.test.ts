@@ -215,12 +215,10 @@ describe("gateway host desktop source", () => {
         },
         platform: "linux",
         ...(managedMode ? { managedDesktop: managed.managed } : {}),
-        ...(!explicitPort
-          ? {
-              probeRfb: async (): Promise<rfbProbe.RfbProbeResult> =>
-                mode === "managed" ? { kind: "unreachable" } : { kind: "rfb", securityTypes: [2] },
-            }
-          : {}),
+        probeRfb: explicitPort
+          ? undefined
+          : async (): Promise<rfbProbe.RfbProbeResult> =>
+              mode === "managed" ? { kind: "unreachable" } : { kind: "rfb", securityTypes: [2] },
       });
       if (mode === "managed") {
         await expect(source.acquire()).resolves.toMatchObject({

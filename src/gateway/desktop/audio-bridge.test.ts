@@ -6,20 +6,15 @@ import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js"
 import { markGatewayIngressTransport } from "../ingress-attribution.js";
 import { createRemoteControlUiIngressTestContext } from "../remote-control-ui.test-support.js";
 import type { RemoteControlUiIngressContext } from "../server/client-identity-types.js";
-import { createAudioFixture } from "./audio.test-support.js";
+import { assertAudioCurrent, createAudioFixture } from "./audio.test-support.js";
 import type { DesktopAudioSource } from "./managed-linux-audio.js";
 
 const peers = vi.hoisted(() => ({ next: undefined as unknown }));
 vi.mock("../../../packages/gateway-client/src/websocket.js", () => ({
   WebSocket: { OPEN: 1 },
   WebSocketServer: class {
-    handleUpgrade(
-      _req: unknown,
-      _socket: unknown,
-      _head: unknown,
-      callback: (ws: unknown) => void,
-    ) {
-      callback(peers.next);
+    handleUpgrade(...args: [unknown, unknown, unknown, (ws: unknown) => void]) {
+      args[3](peers.next);
     }
   },
 }));
@@ -31,16 +26,13 @@ class Peer extends EventEmitter {
   bufferedAmount = 0;
   sent: Array<string | Buffer> = [];
   closed: Array<[number, string]> = [];
-  send(data: string | Buffer) {
-    this.sent.push(data);
-  }
+  send = (data: string | Buffer) => this.sent.push(data);
   close(code: number, reason: string) {
     this.closed.push([code, reason]);
     this.readyState = 3;
   }
-  command(action: string) {
+  command = (action: string) =>
     this.emit("message", Buffer.from(JSON.stringify({ action })), false);
-  }
 }
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const cleanups: Array<() => void> = [];
@@ -95,56 +87,24 @@ function fixture(
     handleDesktopAudioUpgrade(req, transport, Buffer.alloc(0));
     return transport;
   };
-  const firstCapture = () => {
-    const capture = captures[0];
-    if (!capture) {
-      throw new Error("Expected an admitted capture");
-    }
-    return capture;
-  };
-  const activate = () => {
-    attach();
-    observation.activate();
-  };
-  const capture = async () => {
-    activate();
-    peer.command("start");
-    await flush();
-    return firstCapture();
-  };
-  return { observation, peer, start, firstCapture, attach, activate, capture };
+  const firstCapture = () => captures[0]!;
+  return { observation, peer, start, firstCapture, captures, attach };
 }
 
 describe("screen-owned desktop audio", () => {
-  it("does not capture on attach or before screen authentication, then delivers remote PCM", async () => {
+  it.each([false, true])("gates and serializes PCM (pending auth: %s)", async (pending) => {
     const f = fixture();
     f.attach();
     await flush();
     expect(f.start).not.toHaveBeenCalled();
-    f.peer.command("start");
-    await flush();
-    expect(f.start).not.toHaveBeenCalled();
-    f.observation.activate();
-    await flush();
-    expect(f.start).toHaveBeenCalledTimes(1);
-    const pcm = Buffer.from([0, 1, 0, 2]);
-    f.firstCapture().stream.write(pcm);
-    expect(f.peer.sent).toContainEqual(pcm);
-    f.observation.close();
-    await flush();
-    expect(f.firstCapture().signal.aborted).toBe(true);
-    expect(f.firstCapture().stop).toHaveBeenCalledTimes(1);
-  });
-
-  it.each([false, true])("serializes capture intent (pending auth: %s)", async (pending) => {
-    const f = fixture();
-    f.attach();
     if (pending) {
       for (let n = 0; n < 100; n++) {
         f.peer.command("start");
         f.peer.command("stop");
       }
       f.peer.command("start");
+      await flush();
+      expect(f.start).not.toHaveBeenCalled();
     }
     f.observation.activate();
     await flush();
@@ -156,6 +116,9 @@ describe("screen-owned desktop audio", () => {
     f.peer.command("start");
     await flush();
     expect(f.start).toHaveBeenCalledTimes(1);
+    const pcm = Buffer.from([0, 1, 0, 2]);
+    f.firstCapture().stream.write(pcm);
+    expect(f.peer.sent).toContainEqual(pcm);
     f.peer.command("stop");
     const before = f.peer.sent.length;
     f.firstCapture().stream.write(Buffer.alloc(4, 10));
@@ -164,6 +127,10 @@ describe("screen-owned desktop audio", () => {
     await flush();
     expect(f.firstCapture().stop).toHaveBeenCalledTimes(1);
     expect(f.start).toHaveBeenCalledTimes(2);
+    f.observation.close();
+    await flush();
+    expect(f.captures[1]?.signal.aborted).toBe(true);
+    expect(f.captures[1]?.stop).toHaveBeenCalledTimes(1);
   });
 
   it("rejects replay and retires abandoned screen grants", async () => {
@@ -183,7 +150,11 @@ describe("screen-owned desktop audio", () => {
     async (event) => {
       let current = true;
       const f = fixture({ isCurrent: () => current });
-      const capture = await f.capture();
+      f.attach();
+      f.observation.activate();
+      f.peer.command("start");
+      await flush();
+      const capture = f.firstCapture();
       if (event === "recorder close") {
         capture.stream.destroy();
         capture.stream.emit("close");
@@ -201,10 +172,8 @@ describe("screen-owned desktop audio", () => {
         expect(capture.signal.aborted).toBe(true);
       } else {
         expect(
-          f.peer.sent.some(
-            (item) => typeof item === "string" && JSON.parse(item).state === "error",
-          ),
-        ).toBe(true);
+          f.peer.sent.filter((item) => typeof item === "string").map((item) => JSON.parse(item)),
+        ).toContainEqual(expect.objectContaining({ state: "error" }));
         expect(capture.stream.listenerCount("data")).toBe(0);
         f.peer.command("start");
         await flush();
@@ -228,11 +197,7 @@ describe("screen-owned desktop audio", () => {
     const ingress =
       authority === "ingress"
         ? createRemoteControlUiIngressTestContext({
-            assertCurrent() {
-              if (!current) {
-                throw new Error("ingress revoked");
-              }
-            },
+            assertCurrent: () => assertAudioCurrent(current),
           })
         : undefined;
     const f = fixture(
@@ -240,7 +205,8 @@ describe("screen-owned desktop audio", () => {
       audio.source,
       ingress,
     );
-    f.activate();
+    f.attach();
+    f.observation.activate();
     f.peer.command("start");
     await native.captureSpawned.promise;
     current = allowed;
@@ -260,7 +226,8 @@ describe("screen-owned desktop audio", () => {
 
   it("rejects binary or unknown commands without starting capture", async () => {
     const f = fixture();
-    f.activate();
+    f.attach();
+    f.observation.activate();
     f.peer.emit("message", Buffer.alloc(4), true);
     await flush();
     expect(f.peer.closed[0]?.[0]).toBe(1008);

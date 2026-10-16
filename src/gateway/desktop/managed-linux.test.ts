@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { isSecretValueRegisteredForRedaction } from "../../logging/secret-redaction-registry.js";
+import type { BufferedCommandResult } from "../../process/exec.js";
 import type {
   ManagedRun,
   ProcessSupervisor,
@@ -11,6 +12,7 @@ import type {
   SpawnInput,
 } from "../../process/supervisor/types.js";
 import * as audioBridge from "./audio-bridge.js";
+import { runExit } from "./computer.test-support.js";
 import { createHostDesktopService } from "./host-source.js";
 import { createManagedLinuxAudio } from "./managed-linux-audio.js";
 import { createManagedLinuxDesktop } from "./managed-linux.js";
@@ -37,15 +39,17 @@ afterEach(async () => {
 });
 
 function exited(stderr = ""): RunExit {
+  return runExit({ exitCode: 1, durationMs: 1, stderr });
+}
+
+function passwordResult(missing = false): BufferedCommandResult {
   return {
-    reason: "exit",
-    exitCode: 1,
-    exitSignal: null,
-    durationMs: 1,
-    stdout: "",
-    stderr,
-    timedOut: false,
-    noOutputTimedOut: false,
+    stdout: missing ? Buffer.alloc(0) : Buffer.from("12345678", "hex"),
+    stderr: missing ? Buffer.from("spawn ENOENT") : Buffer.alloc(0),
+    code: missing ? null : 0,
+    signal: null,
+    killed: false,
+    termination: missing ? "error" : "exit",
   };
 }
 
@@ -79,12 +83,6 @@ function createFakeSupervisor() {
       input.assertCurrent?.();
       inputs.push(input);
       const { promise: wait, resolve: settle } = createDeferred<RunExit>();
-      const record = {
-        managed: undefined as unknown as ManagedRun,
-        settle,
-        settled: false,
-        scopeKey: input.scopeKey,
-      };
       const managed: ManagedRun = {
         activity: {
           get resultSettled() {
@@ -102,7 +100,7 @@ function createFakeSupervisor() {
           }
         },
       };
-      record.managed = managed;
+      const record = { managed, settle, settled: false, scopeKey: input.scopeKey };
       runs.push(record);
       if (input.mode === "child" && input.argv[0] === "dbus-daemon") {
         input.onStdout?.(`${input.env?.DBUS_SESSION_BUS_ADDRESS},guid=fixture\n`);
@@ -129,18 +127,23 @@ function createFakeSupervisor() {
       }
     },
   };
+  const exit = (index: number, stderr = "") => {
+    const run = runs[index];
+    if (!run || run.settled) {
+      throw new Error(`fake run ${index} is unavailable`);
+    }
+    run.settled = true;
+    run.settle(exited(stderr));
+  };
   return {
     inputs,
     runs,
     supervisor,
+    exit,
     afterSpawn: (count: number) => spawnCompletion(count).promise,
-    exit(index: number, stderr = "") {
-      const run = runs[index];
-      if (!run || run.settled) {
-        throw new Error(`fake run ${index} is unavailable`);
-      }
-      run.settled = true;
-      run.settle(exited(stderr));
+    async restart(index: number, count: number) {
+      exit(index);
+      await spawnCompletion(count).promise;
     },
   };
 }
@@ -221,14 +224,7 @@ async function createFixture(createAudio = noAudio, onFailed?: (error: string) =
   const unixSocketTable = path.join(root, "unix");
   const fake = createFakeSupervisor();
   let now = 0;
-  const runPasswordTool = vi.fn(async () => ({
-    stdout: Buffer.from("12345678", "hex"),
-    stderr: Buffer.alloc(0),
-    code: 0,
-    signal: null,
-    killed: false,
-    termination: "exit" as const,
-  }));
+  const runPasswordTool = vi.fn(async () => passwordResult());
   const probeRfb = vi
     .fn()
     .mockResolvedValueOnce({ kind: "unreachable" as const })
@@ -300,8 +296,7 @@ describe("managed Linux desktop", () => {
       }
       const firstSource = minted.mock.calls[0]![0].source;
       const firstCapture = await firstSource.start(signal());
-      fake.exit(processIndex);
-      await fake.afterSpawn(processIndex === 0 ? 9 : 6);
+      await fake.restart(processIndex, processIndex === 0 ? 9 : 6);
       expect(firstCapture.stream.destroyed).toBe(true);
       if (processIndex === 1) {
         expect(lease.isCurrent()).toBe(true);
@@ -313,7 +308,6 @@ describe("managed Linux desktop", () => {
       const nextSource = minted.mock.calls[1]![0].source;
       expect(nextSource).not.toBe(firstSource);
       expect(acquired.resolveAudio!()).toBe(nextSource);
-      expect(acquired.resolveAudio!()).not.toBe(firstSource);
       expect(acquired.resolveAudio!()).toBe((await desktop.acquire()).resolveAudio!());
       await expect(firstSource.start(signal())).rejects.toThrow();
       const capture = await nextSource.start(signal());
@@ -428,8 +422,7 @@ describe("managed Linux desktop", () => {
     const lease = await desktop.acquireComputer({ onStop: stopped });
     const original = acquired.resolveAudio!()!;
     for (const index of [1, 4, 5]) {
-      fake.exit(index);
-      await fake.afterSpawn(Math.max(5, index + 2));
+      await fake.restart(index, Math.max(5, index + 2));
     }
     const lastSource = acquired.resolveAudio!()!;
     const capture = await lastSource.start(signal());
@@ -456,8 +449,7 @@ describe("managed Linux desktop", () => {
       [10, 16],
       [15, 20],
     ] as const) {
-      fake.exit(index);
-      await fake.afterSpawn(nextCount);
+      await fake.restart(index, nextCount);
       expect(fake.inputs).toHaveLength(nextCount);
       expect(desktop.status().state).toBe("running");
     }
@@ -480,17 +472,14 @@ describe("managed Linux desktop", () => {
     const { desktop, fake, advanceTime } = await createFixture(availableAudio);
     const acquired = await desktop.acquire();
     for (const index of [0, 4, 8]) {
-      fake.exit(index);
-      await fake.afterSpawn(index + 8);
+      await fake.restart(index, index + 8);
     }
     const lease = await desktop.acquireComputer({ onStop });
     for (const index of [13, 16, 17]) {
-      fake.exit(index);
-      await fake.afterSpawn(Math.max(17, index + 2));
+      await fake.restart(index, Math.max(17, index + 2));
     }
     advanceTime(5 * 60_000);
-    fake.exit(18);
-    await fake.afterSpawn(20);
+    await fake.restart(18, 20);
     expect(acquired.resolveAudio!()).toBeDefined();
     expect(lease.isCurrent()).toBe(true);
   });
@@ -543,15 +532,13 @@ describe("managed Linux desktop", () => {
       expect(JSON.stringify(first)).not.toContain(missing);
       await releaseDesktopObserverToken(first.wsPath, requester);
       unavailable = false;
-      fake.exit(0);
-      await fake.afterSpawn(7);
+      await fake.restart(0, 7);
       const second = await service.observe({ control: false, requester });
       expect(second.audio).toBeDefined();
       expect(second.audioUnavailableReason).toBeUndefined();
       await releaseDesktopObserverToken(second.wsPath, requester);
       unavailable = true;
-      fake.exit(3);
-      await fake.afterSpawn(10);
+      await fake.restart(3, 10);
       const third = await service.observe({ control: false, requester });
       expect(third.audio).toBeUndefined();
       expect(third.audioUnavailableReason).toBe("setup-unavailable");
@@ -575,8 +562,7 @@ describe("managed Linux desktop", () => {
     await desktop.acquire();
     const first = await desktop.acquireComputer({ onStop });
     expect(first.env.PULSE_SERVER).not.toBe(process.env.PULSE_SERVER);
-    fake.exit(0);
-    await fake.afterSpawn(6);
+    await fake.restart(0, 6);
     expect(first.isCurrent()).toBe(false);
     const next = await desktop.acquireComputer({ onStop });
     expect(next.env).toMatchObject({
@@ -711,14 +697,7 @@ describe("managed Linux desktop", () => {
       };
       const runPasswordTool =
         missingBinary === "tigervncpasswd"
-          ? vi.fn(async () => ({
-              stdout: Buffer.alloc(0),
-              stderr: Buffer.from("spawn ENOENT"),
-              code: null,
-              signal: null,
-              killed: false,
-              termination: "error" as const,
-            }))
+          ? vi.fn(async () => passwordResult(true))
           : fixture.runPasswordTool;
       const desktop = fixture.makeDesktop({
         supervisor,

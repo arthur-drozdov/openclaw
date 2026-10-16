@@ -12,6 +12,7 @@ import { ComputerHostFinalizationError, type ComputerHostInput } from "./compute
 import {
   computerCapabilities,
   observeSettlement as observe,
+  runExit,
   whileHeld,
 } from "./computer.test-support.js";
 
@@ -35,31 +36,16 @@ function createChildFixture(options: { startupError?: string; finalizationError?
   const invocationReceived = createDeferredCore<Extract<ComputerHostInput, { type: "invoke" }>>();
   const messages: ComputerHostInput[] = [];
   const inputs: SpawnInput[] = [];
-  let input: SpawnInput | undefined;
-  let resultSettled = false;
+  const activity = { resultSettled: false, lastOutputAtMs: 0 };
   const exit = (exitCode = 0) => {
-    resultSettled = true;
-    exited.resolve({
-      reason: "exit",
-      exitCode,
-      exitSignal: null,
-      durationMs: 1,
-      stdout: "",
-      stderr: "",
-      timedOut: false,
-      noOutputTimedOut: false,
-    });
+    activity.resultSettled = true;
+    exited.resolve(runExit({ exitCode, durationMs: 1 }));
   };
-  const emit = (message: unknown) => input?.onStdout?.(`${JSON.stringify(message)}\n`);
+  const emit = (message: unknown) => inputs.at(-1)?.onStdout?.(`${JSON.stringify(message)}\n`);
   const run: ManagedRun = {
     runId: "synthetic-computer",
     startedAtMs: 0,
-    activity: {
-      get resultSettled() {
-        return resultSettled;
-      },
-      lastOutputAtMs: 0,
-    },
+    activity,
     wait: () => exited.promise,
     cancel: vi.fn(() => exit()),
     stdin: {
@@ -92,7 +78,6 @@ function createChildFixture(options: { startupError?: string; finalizationError?
     acquireScopeCleanup: () => cleanupScope,
     spawn: async (params) => {
       params.assertCurrent?.();
-      input = params;
       inputs.push(params);
       return run;
     },

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
-import { createAudioFixture } from "./audio.test-support.js";
+import { assertAudioCurrent, createAudioFixture } from "./audio.test-support.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const cleanups: Array<() => Promise<void>> = [];
@@ -88,11 +88,7 @@ describe("managed Linux private audio", () => {
       const audio = await f.owner.ready;
       let current = true;
       const controller = new AbortController();
-      const started = audio.source!.start(controller.signal, () => {
-        if (!current) {
-          throw new Error("viewer retired");
-        }
-      });
+      const started = audio.source!.start(controller.signal, () => assertAudioCurrent(current));
       const rejected = allowed ? undefined : expect(started).rejects.toThrow("viewer retired");
       await f.captureSpawned.promise;
       current = allowed;
@@ -141,13 +137,7 @@ describe("managed Linux private audio", () => {
       const controller = new AbortController();
       const started = audio.source!.start(
         controller.signal,
-        failure === "authority"
-          ? () => {
-              if (!current) {
-                throw new Error("viewer retired");
-              }
-            }
-          : undefined,
+        failure === "authority" ? () => assertAudioCurrent(current) : undefined,
       );
       const rejected = expect(started).rejects.toThrow(message);
       if (failure === "timeout" || failure === "abort") {

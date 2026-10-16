@@ -6,7 +6,14 @@ import type {
   RunExit,
   SpawnInput,
 } from "../../process/supervisor/types.js";
+import { runExit } from "./computer.test-support.js";
 import { createManagedLinuxAudio, managedLinuxAudioEnv } from "./managed-linux-audio.js";
+
+export function assertAudioCurrent(current: boolean) {
+  if (!current) {
+    throw new Error("viewer retired");
+  }
+}
 
 export function createAudioFixture(
   tempDir: string,
@@ -54,16 +61,7 @@ export function createAudioFixture(
         wait: () => exit.promise,
         cancel() {
           activity.resultSettled = true;
-          exit.resolve({
-            reason: "manual-cancel",
-            exitCode: 0,
-            exitSignal: null,
-            durationMs: 0,
-            stdout: "",
-            stderr: "",
-            timedOut: false,
-            noOutputTimedOut: false,
-          });
+          exit.resolve(runExit({ reason: "manual-cancel" }));
         },
       };
       runs.push(run);
