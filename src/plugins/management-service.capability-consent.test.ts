@@ -96,6 +96,43 @@ const { setManagedPluginEnabled } = await import("./management-mutations.js");
 
 const trackedArtifactDirs: string[] = [];
 
+type ConsentOptions = Parameters<typeof resolvePluginCapabilityConsent>[0];
+const consent = (options: Partial<ConsentOptions> = {}) =>
+  resolvePluginCapabilityConsent({ config: {}, env: {}, pluginId: "community-plugin", ...options });
+const inspectCommunity = () =>
+  inspectManagedPlugin({ config: {}, env: {}, pluginId: "community-plugin" });
+function artifactHandler(
+  options: Partial<Parameters<typeof createManagedPluginArtifactConsentHandler>[0]> = {},
+) {
+  return createManagedPluginArtifactConsentHandler({ config: {}, source: "npm", ...options });
+}
+function isolatedEnv(rootDir: string) {
+  return {
+    HOME: rootDir,
+    OPENCLAW_STATE_DIR: path.join(rootDir, "state"),
+    OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1",
+    OPENCLAW_DISABLE_BUNDLED_SOURCE_OVERLAYS: "1",
+  };
+}
+function discoveredMetadata(
+  config: ConsentOptions["config"],
+  env: NodeJS.ProcessEnv,
+  installRecords = mocks.records,
+) {
+  const { index, manifestRegistry } = loadInstalledPluginIndexWithDiscovery({
+    config,
+    env,
+    installRecords,
+  });
+  return {
+    index,
+    byPluginId: new Map(manifestRegistry.plugins.map((manifest) => [manifest.id, manifest])),
+    plugins: manifestRegistry.plugins,
+    diagnostics: manifestRegistry.diagnostics,
+    normalizePluginId: (pluginId: string) => pluginId,
+  };
+}
+
 function createConsentArtifact(pluginId = "community-plugin", providers: string[] = []): string {
   const rootDir = makeTrackedTempDir("managed-capability-consent", trackedArtifactDirs);
   writeConsentArtifact(rootDir, pluginId, providers);
@@ -275,8 +312,7 @@ describe("managed plugin capability consent", () => {
     async (sourceRecord) => {
       const rootDir = officialArtifact();
       const onCapabilityConsent = vi.fn<PluginCapabilityConsentHandler>();
-      const handler = createManagedPluginArtifactConsentHandler({
-        config: {},
+      const handler = artifactHandler({
         source: sourceRecord.source,
         spec: sourceRecord.spec,
         onCapabilityConsent,
@@ -296,8 +332,7 @@ describe("managed plugin capability consent", () => {
 
   it("requires review for a custom ClawHub server", async () => {
     const sourceRecord = { ...officialSources[1]!, clawhubUrl: "https://plugins.example" };
-    const handler = createManagedPluginArtifactConsentHandler({
-      config: {},
+    const handler = artifactHandler({
       source: sourceRecord.source,
       spec: sourceRecord.spec,
     });
@@ -313,9 +348,7 @@ describe("managed plugin capability consent", () => {
 
   it("rechecks first-party package identity after the commit guard yields", async () => {
     const rootDir = officialArtifact();
-    const handler = createManagedPluginArtifactConsentHandler({
-      config: {},
-      source: "npm",
+    const handler = artifactHandler({
       beforePersistentEffect: async () => {
         const packagePath = path.join(rootDir, "package.json");
         const manifest = JSON.parse(fs.readFileSync(packagePath, "utf8"));
@@ -334,7 +367,7 @@ describe("managed plugin capability consent", () => {
 
   it("does not carry a first-party exemption into an unverified fallback stage", async () => {
     const rootDir = officialArtifact();
-    const handler = createManagedPluginArtifactConsentHandler({ config: {}, source: "npm" });
+    const handler = artifactHandler();
     const artifact = { pluginId: "diffs", stagedArtifactDir: rootDir, mode: "install" as const };
     await handler.onBeforePluginArtifactCommit({ ...artifact, sourceRecord: officialSources[0] });
     await expect(handler.onBeforePluginArtifactCommit(artifact)).rejects.toMatchObject({
@@ -351,25 +384,8 @@ describe("managed plugin capability consent", () => {
     const config = {
       plugins: { load: { paths: [rootDir] }, entries: { diffs: { enabled: true } } },
     };
-    const env = {
-      HOME: rootDir,
-      OPENCLAW_STATE_DIR: path.join(rootDir, "state"),
-      OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1",
-      OPENCLAW_DISABLE_BUNDLED_SOURCE_OVERLAYS: "1",
-    };
-    const { index, manifestRegistry } = loadInstalledPluginIndexWithDiscovery({
-      config,
-      env,
-      installRecords: { diffs: record },
-    });
-    const byPluginId = new Map(manifestRegistry.plugins.map((manifest) => [manifest.id, manifest]));
-    const metadata = {
-      index,
-      byPluginId,
-      plugins: manifestRegistry.plugins,
-      diagnostics: manifestRegistry.diagnostics,
-      normalizePluginId: (pluginId: string) => pluginId,
-    };
+    const env = isolatedEnv(rootDir);
+    const metadata = discoveredMetadata(config, env, { diffs: record });
     mocks.records = { diffs: record };
     mocks.metadata.mockReturnValue(metadata);
     await expect(
@@ -417,12 +433,7 @@ describe("managed plugin capability consent", () => {
     const onCapabilityConsent = vi.fn<PluginCapabilityConsentHandler>(async (review) => ({
       reviewToken: review.reviewToken,
     }));
-    await resolvePluginCapabilityConsent({
-      config: {},
-      env,
-      pluginId: "community-plugin",
-      onCapabilityConsent,
-    });
+    await consent({ env, onCapabilityConsent });
 
     const persisted = mocks.records["community-plugin"]!;
     expect(persisted).toMatchObject({
@@ -436,14 +447,7 @@ describe("managed plugin capability consent", () => {
       expect.objectContaining({ config: {}, env, lease: expect.any(Object) }),
     );
 
-    await expect(
-      resolvePluginCapabilityConsent({
-        config: {},
-        env,
-        pluginId: "community-plugin",
-        onCapabilityConsent,
-      }),
-    ).resolves.toBeUndefined();
+    await expect(consent({ env, onCapabilityConsent })).resolves.toBeUndefined();
     expect(mocks.writeRecords).toHaveBeenCalledTimes(1);
     expect(onCapabilityConsent).toHaveBeenCalledTimes(1);
   });
@@ -477,25 +481,13 @@ describe("managed plugin capability consent", () => {
         },
       },
     };
-    const env = {
-      HOME: rootDir,
-      OPENCLAW_STATE_DIR: path.join(rootDir, "state"),
-      OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1",
-      OPENCLAW_DISABLE_BUNDLED_SOURCE_OVERLAYS: "1",
-    };
+    const env = isolatedEnv(rootDir);
     mocks.records = { "community-plugin": record };
-    const { index, manifestRegistry } = loadInstalledPluginIndexWithDiscovery({
-      config,
-      env,
-      installRecords: mocks.records,
-    });
-    const manifests = new Map(manifestRegistry.plugins.map((manifest) => [manifest.id, manifest]));
+    const metadata = discoveredMetadata(config, env);
+    const manifests = metadata.byPluginId;
     mocks.metadata.mockImplementation(() => ({
-      index: { ...index, installRecords: { ...mocks.records } },
-      byPluginId: manifests,
-      plugins: manifestRegistry.plugins,
-      diagnostics: manifestRegistry.diagnostics,
-      normalizePluginId: (pluginId: string) => pluginId,
+      ...metadata,
+      index: { ...metadata.index, installRecords: { ...mocks.records } },
     }));
 
     const inspections = await Promise.all(
@@ -545,25 +537,14 @@ describe("managed plugin capability consent", () => {
       return { reviewToken: review.reviewToken };
     });
 
-    await expect(
-      resolvePluginCapabilityConsent({
-        config: {},
-        env: {},
-        pluginId: "community-plugin",
-        onCapabilityConsent,
-      }),
-    ).rejects.toMatchObject({
+    await expect(consent({ onCapabilityConsent })).rejects.toMatchObject({
       capabilityConsent: { pluginId: "community-plugin" },
     });
     expect(onCapabilityConsent).toHaveBeenCalledWith(
       expect.objectContaining({ reviewToken: reviewedToken }),
     );
     expect(mocks.writeRecords).not.toHaveBeenCalled();
-    const inspection = await inspectManagedPlugin({
-      config: {},
-      env: {},
-      pluginId: "community-plugin",
-    });
+    const inspection = await inspectCommunity();
     expect(inspection.declared.providers).toEqual(["unreviewed-provider"]);
     expect(inspection.reviewToken).not.toBe(reviewedToken);
   });
@@ -583,9 +564,7 @@ describe("managed plugin capability consent", () => {
       "new-provider",
     ]);
 
-    await expect(
-      resolvePluginCapabilityConsent({ config: {}, env: {}, pluginId: "community-plugin" }),
-    ).rejects.toMatchObject({
+    await expect(consent()).rejects.toMatchObject({
       capabilityConsent: {
         widened: { providers: ["new-provider"] },
         acceptedAt: "2026-08-25T00:00:00.000Z",
@@ -597,9 +576,7 @@ describe("managed plugin capability consent", () => {
     const snapshot = configureExternalPlugin(installRecord());
     recordInstalledPluginIndexInstallOwner(snapshot.index.plugins[0]!, undefined, true);
 
-    await expect(
-      resolvePluginCapabilityConsent({ config: {}, env: {}, pluginId: "community-plugin" }),
-    ).rejects.toThrow("ambiguous package ownership");
+    await expect(consent()).rejects.toThrow("ambiguous package ownership");
     expect(mocks.writeRecords).not.toHaveBeenCalled();
   });
 
@@ -609,9 +586,7 @@ describe("managed plugin capability consent", () => {
     const firstReviewToken = computeDeclaredSurfaceHash(
       resolvePluginArtifactDeclaredSurface(artifactDir),
     );
-    const firstHandler = createManagedPluginArtifactConsentHandler({
-      config: {},
-      source: "npm",
+    const firstHandler = artifactHandler({
       spec: "community-plugin",
     });
 
@@ -625,11 +600,7 @@ describe("managed plugin capability consent", () => {
       capabilityConsent: { pluginId: "community-plugin", reviewToken: firstReviewToken },
     });
 
-    const firstInspection = await inspectManagedPlugin({
-      config: {},
-      env: {},
-      pluginId: "community-plugin",
-    });
+    const firstInspection = await inspectCommunity();
     expect(firstInspection).toMatchObject({
       plugin: { id: "community-plugin", name: "Community Plugin", installed: false },
       declared: { providers: [] },
@@ -640,9 +611,7 @@ describe("managed plugin capability consent", () => {
     const refreshedToken = computeDeclaredSurfaceHash(
       resolvePluginArtifactDeclaredSurface(artifactDir),
     );
-    const staleHandler = createManagedPluginArtifactConsentHandler({
-      config: {},
-      source: "npm",
+    const staleHandler = artifactHandler({
       spec: "community-plugin",
       acknowledgeCapabilities: { reviewToken: firstReviewToken },
     });
@@ -656,9 +625,7 @@ describe("managed plugin capability consent", () => {
     ).rejects.toMatchObject({
       capabilityConsent: { pluginId: "community-plugin", reviewToken: refreshedToken },
     });
-    await expect(
-      inspectManagedPlugin({ config: {}, env: {}, pluginId: "community-plugin" }),
-    ).resolves.toMatchObject({
+    await expect(inspectCommunity()).resolves.toMatchObject({
       declared: { providers: ["unreviewed-provider"] },
       reviewToken: refreshedToken,
     });

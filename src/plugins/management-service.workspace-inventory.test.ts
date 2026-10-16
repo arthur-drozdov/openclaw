@@ -67,6 +67,49 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
+function isolateWorkspace(root: string, configPath?: string) {
+  vi.stubEnv("OPENCLAW_HOME", path.join(root, "home"));
+  vi.stubEnv("OPENCLAW_STATE_DIR", path.join(root, "state"));
+  vi.stubEnv("OPENCLAW_DISABLE_BUNDLED_PLUGINS", "1");
+  if (configPath) {
+    vi.stubEnv("OPENCLAW_CONFIG_PATH", configPath);
+  }
+}
+
+async function useRealConfigFile(configPath: string, config: OpenClawConfig) {
+  const raw = JSON.stringify(config);
+  fs.writeFileSync(configPath, raw);
+  const actual = await vi.importActual<typeof import("../config/config.js")>("../config/config.js");
+  configIo.read.mockImplementation(actual.readConfigFileSnapshotForWrite);
+  configIo.write.mockImplementation(actual.replaceConfigFile);
+  return { raw, actual };
+}
+
+function publishMetadata(config: OpenClawConfig) {
+  const boot = resolveConfigWidePluginMetadataSnapshot({
+    config,
+    env: process.env,
+    allowCurrent: false,
+  });
+  setGatewayPluginMetadataSnapshot(boot, { config, env: process.env });
+  return boot;
+}
+
+function coldFixture(rootDir: string, pluginId: string, kind?: string) {
+  mkdirSafeDir(rootDir);
+  return createColdPluginFixture({
+    rootDir,
+    pluginId,
+    manifest: {
+      ...(kind ? { kind } : {}),
+      providers: [],
+      channels: [],
+      channelConfigs: {},
+      providerAuthChoices: [],
+    },
+  });
+}
+
 function mockConfigFile(
   configPath: string,
   read: () => OpenClawConfig,
@@ -100,19 +143,12 @@ it("refreshes foreign install facts and requires live authority before publishin
   mkdirSafeDir(pluginRoot);
   mkdirSafeDir(loadPath);
   const fixture = createColdPluginFixture({ rootDir: pluginRoot, pluginId: "external-candidate" });
-  vi.stubEnv("OPENCLAW_HOME", path.join(root, "home"));
-  vi.stubEnv("OPENCLAW_STATE_DIR", path.join(root, "state"));
-  vi.stubEnv("OPENCLAW_DISABLE_BUNDLED_PLUGINS", "1");
+  isolateWorkspace(root);
   const config: OpenClawConfig = { plugins: { load: { paths: [loadPath] } } };
   await writePersistedInstalledPluginIndex(
     loadInstalledPluginIndex({ config, env: process.env, candidates: [], installRecords: {} }),
   );
-  const boot = resolveConfigWidePluginMetadataSnapshot({
-    config,
-    env: process.env,
-    allowCurrent: false,
-  });
-  setGatewayPluginMetadataSnapshot(boot, { config, env: process.env });
+  const boot = publishMetadata(config);
   expect(
     (await listManagedPlugins({ config })).plugins.some((plugin) => plugin.id === fixture.pluginId),
   ).toBe(false);
@@ -241,21 +277,8 @@ it("toggles a listed secondary-workspace plugin without a system owner", async (
   const mainWorkspace = path.join(root, "main");
   const secondaryWorkspace = path.join(root, "secondary");
   const pluginRoot = path.join(secondaryWorkspace, ".openclaw", "extensions", "workspace-memory");
-  mkdirSafeDir(pluginRoot);
-  const fixture = createColdPluginFixture({
-    rootDir: pluginRoot,
-    pluginId: "workspace-memory",
-    manifest: {
-      kind: "memory",
-      providers: [],
-      channels: [],
-      channelConfigs: {},
-      providerAuthChoices: [],
-    },
-  });
-  vi.stubEnv("OPENCLAW_HOME", path.join(root, "home"));
-  vi.stubEnv("OPENCLAW_STATE_DIR", path.join(root, "state"));
-  vi.stubEnv("OPENCLAW_DISABLE_BUNDLED_PLUGINS", "1");
+  const fixture = coldFixture(pluginRoot, "workspace-memory", "memory");
+  isolateWorkspace(root);
   let config: OpenClawConfig = {
     agents: {
       ownership: "explicit",
@@ -273,12 +296,7 @@ it("toggles a listed secondary-workspace plugin without a system owner", async (
       config = next;
     },
   );
-  const boot = resolveConfigWidePluginMetadataSnapshot({
-    config,
-    env: process.env,
-    allowCurrent: false,
-  });
-  setGatewayPluginMetadataSnapshot(boot, { config, env: process.env });
+  const boot = publishMetadata(config);
   expect((await listManagedPlugins({ config })).plugins).toContainEqual(
     expect.objectContaining({ id: fixture.pluginId, installed: true, enabled: false }),
   );
@@ -303,21 +321,14 @@ it.each([true, false])("keeps config bytes for repeated enabled=%s requests", as
   const configPath = path.join(root, "openclaw.json");
   mkdirSafeDir(pluginRoot);
   const fixture = createColdPluginFixture({ rootDir: pluginRoot, pluginId: "policy-noop" });
-  vi.stubEnv("OPENCLAW_HOME", path.join(root, "home"));
-  vi.stubEnv("OPENCLAW_STATE_DIR", path.join(root, "state"));
-  vi.stubEnv("OPENCLAW_CONFIG_PATH", configPath);
-  vi.stubEnv("OPENCLAW_DISABLE_BUNDLED_PLUGINS", "1");
+  isolateWorkspace(root, configPath);
   const config: OpenClawConfig = {
     plugins: {
       load: { paths: [pluginRoot] },
       entries: { [fixture.pluginId]: { enabled } },
     },
   };
-  const raw = JSON.stringify(config);
-  fs.writeFileSync(configPath, raw);
-  const actual = await vi.importActual<typeof import("../config/config.js")>("../config/config.js");
-  configIo.read.mockImplementation(actual.readConfigFileSnapshotForWrite);
-  configIo.write.mockImplementation(actual.replaceConfigFile);
+  const { raw } = await useRealConfigFile(configPath, config);
 
   const result = await mutateManagedPluginEnabled({
     caller: "cli",
@@ -333,17 +344,9 @@ it("preserves env references across management capability consent", async () => 
   const root = makeTrackedTempDir("managed-consent-env", roots);
   const pluginRoot = path.join(root, "plugin");
   const configPath = path.join(root, "openclaw.json");
-  mkdirSafeDir(pluginRoot);
-  const fixture = createColdPluginFixture({
-    rootDir: pluginRoot,
-    pluginId: "consent-env",
-    manifest: { providers: [], channels: [], channelConfigs: {}, providerAuthChoices: [] },
-  });
+  const fixture = coldFixture(pluginRoot, "consent-env");
   fs.writeFileSync(fixture.runtimeSource, 'module.exports = { id: "consent-env", register() {} };');
-  vi.stubEnv("OPENCLAW_HOME", path.join(root, "home"));
-  vi.stubEnv("OPENCLAW_STATE_DIR", path.join(root, "state"));
-  vi.stubEnv("OPENCLAW_CONFIG_PATH", configPath);
-  vi.stubEnv("OPENCLAW_DISABLE_BUNDLED_PLUGINS", "1");
+  isolateWorkspace(root, configPath);
   vi.stubEnv("OPENCLAW_TEST_CONSENT_PREFIX", "before-consent");
   const config: OpenClawConfig = {
     messages: { responsePrefix: "${OPENCLAW_TEST_CONSENT_PREFIX}" },
@@ -352,11 +355,7 @@ it("preserves env references across management capability consent", async () => 
       entries: { [fixture.pluginId]: { enabled: false } },
     },
   };
-  const raw = JSON.stringify(config);
-  fs.writeFileSync(configPath, raw);
-  const actual = await vi.importActual<typeof import("../config/config.js")>("../config/config.js");
-  configIo.read.mockImplementation(actual.readConfigFileSnapshotForWrite);
-  configIo.write.mockImplementation(actual.replaceConfigFile);
+  const { raw, actual } = await useRealConfigFile(configPath, config);
   await writePersistedInstalledPluginIndex(
     loadInstalledPluginIndex({
       config,
@@ -411,18 +410,7 @@ it.each(["config-write", "none"] as const)(
       "saved-candidate",
       path.join(stateDir, "extensions"),
     );
-    mkdirSafeDir(pluginRoot);
-    const fixture = createColdPluginFixture({
-      rootDir: pluginRoot,
-      pluginId: "saved-candidate",
-      manifest: {
-        kind: "memory",
-        providers: [],
-        channels: [],
-        channelConfigs: {},
-        providerAuthChoices: [],
-      },
-    });
+    const fixture = coldFixture(pluginRoot, "saved-candidate", "memory");
     const rejected = new Error(`intentional ${failure} failure`);
     configIo.write.mockImplementation(async (params: ConfigReplaceInput) => {
       if (failure === "config-write") {
@@ -477,22 +465,8 @@ it("persists management disable before a cold context-engine runtime turn", asyn
   const root = tempDirs.make("managed-context-disable-");
   const pluginRoot = path.join(root, "plugin");
   const configPath = path.join(root, "openclaw.json");
-  mkdirSafeDir(pluginRoot);
-  const fixture = createColdPluginFixture({
-    rootDir: pluginRoot,
-    pluginId: "synthetic-context-engine",
-    manifest: {
-      kind: "context-engine",
-      providers: [],
-      channels: [],
-      channelConfigs: {},
-      providerAuthChoices: [],
-    },
-  });
-  vi.stubEnv("OPENCLAW_HOME", path.join(root, "home"));
-  vi.stubEnv("OPENCLAW_STATE_DIR", path.join(root, "state"));
-  vi.stubEnv("OPENCLAW_CONFIG_PATH", configPath);
-  vi.stubEnv("OPENCLAW_DISABLE_BUNDLED_PLUGINS", "1");
+  const fixture = coldFixture(pluginRoot, "synthetic-context-engine", "context-engine");
+  isolateWorkspace(root, configPath);
   const config: OpenClawConfig = {
     plugins: {
       load: { paths: [pluginRoot] },
@@ -500,11 +474,7 @@ it("persists management disable before a cold context-engine runtime turn", asyn
       entries: { [fixture.pluginId]: { enabled: true } },
     },
   };
-  fs.writeFileSync(configPath, JSON.stringify(config));
-  // Keep the suite's config seam, but execute the real persisted config transaction here.
-  const actual = await vi.importActual<typeof import("../config/config.js")>("../config/config.js");
-  configIo.read.mockImplementation(actual.readConfigFileSnapshotForWrite);
-  configIo.write.mockImplementation(actual.replaceConfigFile);
+  const { actual } = await useRealConfigFile(configPath, config);
   await writePersistedInstalledPluginIndex(
     loadInstalledPluginIndex({
       config,

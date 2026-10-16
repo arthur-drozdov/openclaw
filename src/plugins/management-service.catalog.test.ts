@@ -68,6 +68,29 @@ function mockHostedOfficialCatalog(entries: unknown[]) {
 }
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const listPlugins = (config: OpenClawConfig = {}) => listManagedPlugins({ config, env: {} });
+const iconSources = (pluginId = "workboard") =>
+  resolveManagedPluginIconSources({ config: {}, env: {}, pluginId });
+const activityIcon = (toolName?: string, pluginId = "workboard") =>
+  resolveManagedPluginActivityIconSource({ config: {}, env: {}, pluginId, toolName });
+function mockMetadata(params: Parameters<typeof metadataSnapshot>[0]) {
+  mocks.metadata.mockReturnValue(metadataSnapshot(params));
+}
+function installedMemory(clawhubUrl: string) {
+  return metadataSnapshot({
+    enabled: true,
+    id: "community-memory",
+    name: "Community Memory",
+    origin: "global",
+    packageVersion: "4.5.6",
+    installRecord: {
+      source: "clawhub",
+      clawhubUrl,
+      clawhubPackage: "community/memory",
+      version: "4.5.6",
+    },
+  });
+}
 const listLocalPlugins = (config: OpenClawConfig = {}) =>
   listManagedPlugins({ config, env: {}, officialCatalog: { entries: [] } });
 
@@ -92,7 +115,7 @@ describe("managed plugin catalog", () => {
     mocks.metadata.mockReturnValue(emptyMetadataSnapshot());
     mockHostedOfficialCatalog([hostedFeedDiffsEntry]);
 
-    const available = await listManagedPlugins({ config: {}, env: {} });
+    const available = await listPlugins();
     expect(available.plugins).toEqual([
       expect.objectContaining({
         id: "diffs",
@@ -105,10 +128,8 @@ describe("managed plugin catalog", () => {
       }),
     ]);
 
-    mocks.metadata.mockReturnValue(
-      metadataSnapshot({ enabled: true, id: "diffs", name: "Diffs", origin: "global" }),
-    );
-    const installed = await listManagedPlugins({ config: {}, env: {} });
+    mockMetadata({ enabled: true, id: "diffs", name: "Diffs", origin: "global" });
+    const installed = await listPlugins();
     expect(installed.plugins).toHaveLength(1);
     expect(installed.plugins[0]).toMatchObject({ id: "diffs", installed: true, enabled: true });
   });
@@ -120,27 +141,25 @@ describe("managed plugin catalog", () => {
     });
 
     beforeEach(() => {
-      mocks.metadata.mockReturnValue(
-        metadataSnapshot({
-          enabled: true,
-          id: "ref-plugin",
-          configSchema: {
-            type: "object",
-            required: ["apiKey"],
-            properties: {
-              apiKey: {
-                type: "object",
-                required: ["source", "provider", "id"],
-                properties: {
-                  source: { const: "store" },
-                  provider: { type: "string" },
-                  id: { type: "string" },
-                },
+      mockMetadata({
+        enabled: true,
+        id: "ref-plugin",
+        configSchema: {
+          type: "object",
+          required: ["apiKey"],
+          properties: {
+            apiKey: {
+              type: "object",
+              required: ["source", "provider", "id"],
+              properties: {
+                source: { const: "store" },
+                provider: { type: "string" },
+                id: { type: "string" },
               },
             },
           },
-        }),
-      );
+        },
+      });
     });
 
     it.each(["active", "captured"])(
@@ -159,7 +178,7 @@ describe("managed plugin catalog", () => {
           return { source: "hosted", entries: [] };
         });
 
-        const catalog = await listManagedPlugins({ config, env: {} });
+        const catalog = await listPlugins(config);
 
         expect(catalog.plugins[0]).toMatchObject({ id: "ref-plugin", state: "enabled" });
         expect(catalog.plugins[0]).not.toHaveProperty("error");
@@ -178,7 +197,7 @@ describe("managed plugin catalog", () => {
       const runtime = configured({ apiKey: secretRef }, false);
       setRuntimeConfigSnapshot(runtime, source);
 
-      const catalog = await listManagedPlugins({ config: runtime, env: {} });
+      const catalog = await listPlugins(runtime);
 
       expect(catalog.plugins[0]).toMatchObject({ state });
       if (state === "error") {
@@ -193,7 +212,7 @@ describe("managed plugin catalog", () => {
       );
       const candidate = configured({ apiKey: "synthetic-invalid-candidate" });
 
-      const catalog = await listManagedPlugins({ config: candidate, env: {} });
+      const catalog = await listPlugins(candidate);
 
       expect(catalog.plugins[0]).toMatchObject({
         state: "error",
@@ -215,7 +234,7 @@ describe("managed plugin catalog", () => {
       },
     ]);
 
-    const catalog = await listManagedPlugins({ config: {}, env: {} });
+    const catalog = await listPlugins();
 
     expect(catalog.plugins).toEqual([]);
   });
@@ -251,24 +270,18 @@ describe("managed plugin catalog", () => {
       vi.stubEnv("CLAWHUB_URL", undefined);
       vi.stubEnv(registryEnv, activeRegistry);
       const packageName = "@openclaw/diffs";
-      mocks.metadata.mockReturnValue(
-        metadataSnapshot({
-          enabled: false,
-          id: "diffs",
-          origin: "global",
-          categories: ["tools"],
-          installRecord:
-            source === "clawhub"
-              ? { source, clawhubUrl, clawhubPackage: packageName, version: "1.0.0" }
-              : { source, spec: packageName, resolvedName: packageName },
-        }),
-      );
-
-      const local = await listManagedPlugins({
-        config: {},
-        env: {},
-        officialCatalog: { entries: [] },
+      mockMetadata({
+        enabled: false,
+        id: "diffs",
+        origin: "global",
+        categories: ["tools"],
+        installRecord:
+          source === "clawhub"
+            ? { source, clawhubUrl, clawhubPackage: packageName, version: "1.0.0" }
+            : { source, spec: packageName, resolvedName: packageName },
       });
+
+      const local = await listLocalPlugins();
       const [entry] = joinClawHubPluginCatalog({
         local,
         remote: [
@@ -288,11 +301,7 @@ describe("managed plugin catalog", () => {
         action: matches ? "manage" : "install",
       });
       expect(entry?.local.pluginId).toBe(matches ? "diffs" : undefined);
-      const sources = await resolveManagedPluginIconSources({
-        config: {},
-        env: {},
-        pluginId: "diffs",
-      });
+      const sources = await iconSources("diffs");
       const expectedRegistry =
         source === "npm" ? "https://clawhub.ai" : clawhubUrl?.replace(/\/+$/, "");
       expect(sources).toEqual(
@@ -312,18 +321,14 @@ describe("managed plugin catalog", () => {
   ])(
     "derives Media discovery only for enabled generation plugins (%j)",
     async ({ enabled, contracts, expected }) => {
-      mocks.metadata.mockReturnValue(
-        metadataSnapshot({
-          enabled,
-          id: "model-provider",
-          categories: ["models"],
-          contracts,
-        }),
-      );
-      const catalog = await listManagedPlugins({
-        config: { plugins: { entries: { "model-provider": { enabled } } } },
-        env: {},
-        officialCatalog: { entries: [] },
+      mockMetadata({
+        enabled,
+        id: "model-provider",
+        categories: ["models"],
+        contracts,
+      });
+      const catalog = await listLocalPlugins({
+        plugins: { entries: { "model-provider": { enabled } } },
       });
       const plugin = expectDefined(catalog.plugins[0], "managed model provider");
       expect(plugin.categories).toEqual(["models"]);
@@ -338,21 +343,7 @@ describe("managed plugin catalog", () => {
   );
 
   it("batch-enriches missing categories from the exact installed ClawHub version", async () => {
-    mocks.metadata.mockReturnValue(
-      metadataSnapshot({
-        enabled: true,
-        id: "community-memory",
-        name: "Community Memory",
-        origin: "global",
-        packageVersion: "4.5.6",
-        installRecord: {
-          source: "clawhub",
-          clawhubUrl: "https://clawhub.ai",
-          clawhubPackage: "community/memory",
-          version: "4.5.6",
-        },
-      }),
-    );
+    mocks.metadata.mockReturnValue(installedMemory("https://clawhub.ai"));
     mocks.pluginVersionCategories.mockResolvedValue([
       {
         name: "community/memory",
@@ -382,20 +373,6 @@ describe("managed plugin catalog", () => {
   });
 
   it("keeps category enrichment scoped to the installed ClawHub registry", async () => {
-    const installedAt = (clawhubUrl: string) =>
-      metadataSnapshot({
-        enabled: true,
-        id: "community-memory",
-        name: "Community Memory",
-        origin: "global",
-        packageVersion: "4.5.6",
-        installRecord: {
-          source: "clawhub",
-          clawhubUrl,
-          clawhubPackage: "community/memory",
-          version: "4.5.6",
-        },
-      });
     mocks.pluginVersionCategories.mockImplementation(async ({ baseUrl }: { baseUrl: string }) => [
       {
         name: "community/memory",
@@ -404,27 +381,20 @@ describe("managed plugin catalog", () => {
       },
     ]);
 
-    mocks.metadata.mockReturnValue(installedAt("https://private.example/clawhub/"));
+    mocks.metadata.mockReturnValue(installedMemory("https://private.example/clawhub/"));
     const privateCatalog = await listLocalPlugins();
-    mocks.metadata.mockReturnValue(installedAt("https://public.example/"));
+    mocks.metadata.mockReturnValue(installedMemory("https://public.example/"));
     const publicCatalog = await listLocalPlugins();
 
-    expect(mocks.pluginVersionCategories.mock.calls).toEqual([
-      [
+    expect(mocks.pluginVersionCategories.mock.calls).toEqual(
+      ["https://private.example/clawhub", "https://public.example"].map((baseUrl) => [
         {
-          baseUrl: "https://private.example/clawhub",
+          baseUrl,
           skipAuth: true,
           packages: [{ name: "community/memory", version: "4.5.6" }],
         },
-      ],
-      [
-        {
-          baseUrl: "https://public.example",
-          skipAuth: true,
-          packages: [{ name: "community/memory", version: "4.5.6" }],
-        },
-      ],
-    ]);
+      ]),
+    );
     expect(privateCatalog.plugins[0]?.categories).toEqual(["tools"]);
     expect(publicCatalog.plugins[0]?.categories).toEqual(["memory"]);
   });
@@ -483,11 +453,7 @@ describe("managed plugin catalog", () => {
     };
     const env = { HOME: "/tmp/openclaw-managed-plugin-home" };
     const metadata = metadataSnapshot({ enabled: false });
-    const manifest = metadata.byPluginId.get("workboard");
-    expect(manifest).toBeDefined();
-    if (!manifest) {
-      throw new Error("missing workboard manifest fixture");
-    }
+    const manifest = expectDefined(metadata.byPluginId.get("workboard"), "workboard manifest");
     metadata.byPluginId.set("workboard", Object.assign(manifest, { icon }));
     mocks.metadata.mockReturnValue(metadata);
 
@@ -516,16 +482,13 @@ describe("managed plugin catalog", () => {
     expect(catalog.mutationAllowed).toBe(true);
     expect(catalog.plugins[0]).not.toHaveProperty("hasIcon");
     expect(resolved).toEqual([]);
-    expect(mocks.metadata).toHaveBeenNthCalledWith(1, {
-      config,
-      env,
-      workspaceDir: "/tmp/openclaw-managed-plugin-home/research-workspace",
-    });
-    expect(mocks.metadata).toHaveBeenNthCalledWith(2, {
-      config,
-      env,
-      workspaceDir: "/tmp/openclaw-managed-plugin-home/research-workspace",
-    });
+    for (const call of [1, 2]) {
+      expect(mocks.metadata).toHaveBeenNthCalledWith(call, {
+        config,
+        env,
+        workspaceDir: "/tmp/openclaw-managed-plugin-home/research-workspace",
+      });
+    }
   });
 
   it("does not project or resolve official catalog icon URLs", async () => {
@@ -546,11 +509,7 @@ describe("managed plugin catalog", () => {
     mocks.metadata.mockReturnValue(emptyMetadataSnapshot());
 
     const catalog = await listManagedPlugins({ config: {}, env: {}, officialCatalog });
-    const resolved = await resolveManagedPluginIconSources({
-      config: {},
-      env: {},
-      pluginId: "firecrawl",
-    });
+    const resolved = await iconSources("firecrawl");
 
     expect(catalog.plugins[0]).toMatchObject({ id: "firecrawl" });
     expect(catalog.plugins[0]).not.toHaveProperty("hasIcon");
@@ -560,23 +519,14 @@ describe("managed plugin catalog", () => {
 
   it("resolves the portable package icon", async () => {
     const iconPath = "/tmp/workboard/assets/icon.png";
-    mocks.metadata.mockReturnValue(
-      metadataSnapshot({
-        enabled: false,
-        iconPath,
-        channels: ["workboard-chat"],
-      }),
-    );
+    mockMetadata({
+      enabled: false,
+      iconPath,
+      channels: ["workboard-chat"],
+    });
 
-    const catalog = await listManagedPlugins({
-      config: {},
-      env: {},
-    });
-    const resolved = await resolveManagedPluginIconSources({
-      config: {},
-      env: {},
-      pluginId: "workboard",
-    });
+    const catalog = await listPlugins();
+    const resolved = await iconSources();
 
     expect(catalog.plugins[0]).toMatchObject({
       id: "workboard",
@@ -586,9 +536,7 @@ describe("managed plugin catalog", () => {
     expect(resolved).toEqual([{ kind: "file", path: iconPath, rootPath: "/tmp/workboard" }]);
     expect(catalog.plugins[0]).not.toHaveProperty("hasActivityIcon");
     expect(catalog.plugins[0]).not.toHaveProperty("activityIconTools");
-    expect(
-      await resolveManagedPluginActivityIconSource({ config: {}, env: {}, pluginId: "workboard" }),
-    ).toBeUndefined();
+    expect(await activityIcon()).toBeUndefined();
   });
 
   it.each([true, false])(
@@ -598,18 +546,16 @@ describe("managed plugin catalog", () => {
       const searchPath = "/tmp/workboard/assets/activity/Task.Search.svg";
       const protoPath = "/tmp/workboard/assets/activity/__proto__.svg";
       const taskPath = "/tmp/workboard/assets/activity/task.svg";
-      mocks.metadata.mockReturnValue(
-        metadataSnapshot({
-          enabled: hasDefault,
-          activityIconPath: hasDefault ? activityIconPath : undefined,
-          toolActivityIconPaths: hasDefault
-            ? Object.fromEntries([
-                ["__proto__", protoPath],
-                ["Task.Search", searchPath],
-              ])
-            : { task: taskPath },
-        }),
-      );
+      mockMetadata({
+        enabled: hasDefault,
+        activityIconPath: hasDefault ? activityIconPath : undefined,
+        toolActivityIconPaths: hasDefault
+          ? Object.fromEntries([
+              ["__proto__", protoPath],
+              ["Task.Search", searchPath],
+            ])
+          : { task: taskPath },
+      });
       const catalog = await listLocalPlugins();
       expect(catalog.plugins[0]).toMatchObject({
         id: "workboard",
@@ -636,27 +582,13 @@ describe("managed plugin catalog", () => {
             [undefined, undefined],
           ];
       for (const [toolName, expectedPath] of probes) {
-        expect(
-          await resolveManagedPluginActivityIconSource({
-            config: {},
-            env: {},
-            pluginId: "workboard",
-            toolName,
-          }),
-        ).toEqual(
+        expect(await activityIcon(toolName)).toEqual(
           expectedPath
             ? { kind: "file", path: expectedPath, rootPath: "/tmp/workboard" }
             : undefined,
         );
       }
-      expect(
-        await resolveManagedPluginActivityIconSource({
-          config: {},
-          env: {},
-          pluginId: "absent",
-          toolName: "Task.Search",
-        }),
-      ).toBeUndefined();
+      expect(await activityIcon("Task.Search", "absent")).toBeUndefined();
     },
   );
 
