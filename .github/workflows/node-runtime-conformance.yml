@@ -105,7 +105,8 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) && (github.event_name != 'schedule' || needs.scope.outputs.changed == 'true') && (github.event_name != 'schedule' || github.repository == 'openclaw/openclaw') && (github.event_name != 'push' || github.ref != 'refs/heads/main' || vars.OPENCLAW_CI_ON_PUSH == 'true') }}
     name: TypeScript contracts
-    runs-on: ubuntu-24.04
+    # Keep external-contributor PR code on GitHub-hosted runners.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-24.04' || 'spark-arthur-openclaw' }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -115,6 +116,16 @@ jobs:
           fetch-tags: false
           persist-credentials: false
           submodules: false
+
+      - name: Install xz-utils on Linux ARM64
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v xz >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends xz-utils
+          fi
 
       - name: Setup Node environment
         uses: ./.github/actions/setup-node-env
@@ -133,7 +144,8 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) && (github.event_name != 'schedule' || needs.scope.outputs.changed == 'true') && (github.event_name != 'schedule' || github.repository == 'openclaw/openclaw') && (github.event_name != 'push' || github.ref != 'refs/heads/main' || vars.OPENCLAW_CI_ON_PUSH == 'true') }}
     name: Rust workspace
-    runs-on: ubuntu-24.04
+    # Keep external-contributor PR code on GitHub-hosted runners.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-24.04' || 'spark-arthur-openclaw' }}
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -143,6 +155,35 @@ jobs:
           fetch-tags: false
           persist-credentials: false
           submodules: false
+
+      - name: Bootstrap rustup on Linux ARM64
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        shell: bash
+        env:
+          RUSTUP_INIT_SHA256: a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            installer="${RUNNER_TEMP}/rustup-init"
+            curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+              https://static.rust-lang.org/rustup/dist/aarch64-unknown-linux-gnu/rustup-init \
+              --output "$installer"
+            printf '%s  %s\n' "$RUSTUP_INIT_SHA256" "$installer" | sha256sum --check
+            chmod 0755 "$installer"
+            "$installer" --default-toolchain none -y --no-modify-path
+            rm -f "$installer"
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install C build tools on Linux ARM64
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v cc >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends build-essential
+          fi
 
       - name: Install Rust
         run: rustup toolchain install 1.93.0 --profile minimal --component clippy,rustfmt
